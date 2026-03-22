@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -10,7 +11,17 @@ from tkinter import END, StringVar, Tk, Toplevel
 from tkinter import messagebox
 from tkinter import ttk
 
-from dealmaker_generator import Event, build_team, generate_events
+from dealmaker_generator import (
+    Event,
+    build_team,
+    extract_user_id_from_jwt,
+    fetch_profiles_from_supabase,
+    generate_events,
+    load_env_file,
+    normalize_delivery_url,
+    send_events_to_api,
+    validate_api_settings,
+)
 
 
 @dataclass
@@ -23,6 +34,11 @@ class StoreConfig:
     batch_days: int
     every_seconds: int
     seed: int
+    delivery: str
+    api_url: str
+    auth_token: str
+    supabase_apikey: str
+    sales_rep_ids: list[str]   # round-robin pool; empty = auto-fetch from profiles
     output_file: Path
 
 
@@ -35,6 +51,7 @@ class StoreRunner:
         self.status = "stopped"
         self.events_written = 0
         self.last_write_at: str | None = None
+        self.last_api_error: str | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -60,6 +77,14 @@ class StoreRunner:
         while not self._stop_event.is_set():
             seed = self.config.seed + batch_counter
             start_date = datetime.now(timezone.utc)
+
+            # Resolve rep pool: use configured IDs or auto-fetch from Supabase
+            rep_ids = self.config.sales_rep_ids
+            if not rep_ids and self.config.delivery in {"api", "both"}:
+                api_base = self.config.api_url.rstrip("/").split("/functions/")[0].split("/rest/")[0]
+                profiles = fetch_profiles_from_supabase(api_base, self.config.auth_token, self.config.supabase_apikey)
+                rep_ids = [p["id"] for p in profiles if isinstance(p, dict) and p.get("id")]
+
             events = generate_events(
                 start_date=start_date,
                 days=self.config.batch_days,
@@ -67,8 +92,27 @@ class StoreRunner:
                 team=team,
                 dealership_id=self.config.dealership_id,
                 seed=seed,
+                sales_rep_ids=rep_ids if rep_ids else None,
             )
-            self._append_jsonl(events)
+
+            if self.config.delivery in {"file", "both"}:
+                self._append_jsonl(events)
+
+            if self.config.delivery in {"api", "both"}:
+                result = send_events_to_api(
+                    events=events,
+                    api_url=self.config.api_url,
+                    auth_token=self.config.auth_token,
+                    supabase_apikey=self.config.supabase_apikey,
+                )
+                if result["failed"] > 0:
+                    self.status = f"api_errors:{result['failed']}"
+                    first_error = result["errors"][0] if result["errors"] else "unknown api error"
+                    self.last_api_error = first_error[:140]
+                elif self.status.startswith("api_errors"):
+                    self.status = "running"
+                    self.last_api_error = None
+
             batch_counter += 1
 
             if self._stop_event.wait(self.config.every_seconds):
@@ -87,6 +131,7 @@ class StoreRunner:
 
 class DealMakerGUI:
     def __init__(self, root: Tk) -> None:
+        load_env_file()
         self.root = root
         self.root.title("DealMaker Multi-Store Runner")
         self.root.geometry("980x620")
@@ -101,6 +146,11 @@ class DealMakerGUI:
         self.batch_days_var = StringVar(value="1")
         self.every_seconds_var = StringVar(value="10")
         self.seed_var = StringVar(value="42")
+        self.delivery_var = StringVar(value="file")
+        self.api_url_var = StringVar(value=os.getenv("TOPREP_API_URL", ""))
+        self.auth_token_var = StringVar(value=os.getenv("TOPREP_AUTH_TOKEN", ""))
+        self.supabase_apikey_var = StringVar(value=os.getenv("SUPABASE_ANON_KEY", ""))
+        self.sales_rep_id_var = StringVar(value=os.getenv("TOPREP_SALES_REP_ID", ""))
         self.output_dir_var = StringVar(value="output/stores")
 
         self._build_ui()
@@ -127,6 +177,7 @@ class DealMakerGUI:
         columns = (
             "dealership_id",
             "status",
+            "delivery",
             "salespeople",
             "managers",
             "bdc_agents",
@@ -134,6 +185,7 @@ class DealMakerGUI:
             "every_seconds",
             "events_written",
             "last_write_at",
+            "last_api_error",
             "output_file",
         )
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=18)
@@ -141,6 +193,7 @@ class DealMakerGUI:
         headings = {
             "dealership_id": "Store",
             "status": "Status",
+            "delivery": "Delivery",
             "salespeople": "Reps",
             "managers": "Mgrs",
             "bdc_agents": "BDC",
@@ -148,12 +201,14 @@ class DealMakerGUI:
             "every_seconds": "Every(s)",
             "events_written": "Events",
             "last_write_at": "Last Write (UTC)",
+            "last_api_error": "Last API Error",
             "output_file": "Output File",
         }
 
         widths = {
             "dealership_id": 100,
             "status": 90,
+            "delivery": 80,
             "salespeople": 60,
             "managers": 60,
             "bdc_agents": 60,
@@ -161,7 +216,8 @@ class DealMakerGUI:
             "every_seconds": 70,
             "events_written": 80,
             "last_write_at": 180,
-            "output_file": 300,
+            "last_api_error": 280,
+            "output_file": 260,
         }
 
         for col in columns:
@@ -193,6 +249,11 @@ class DealMakerGUI:
         batch_days: str,
         every_seconds: str,
         seed: str,
+        delivery: str,
+        api_url: str,
+        auth_token: str,
+        supabase_apikey: str,
+        sales_rep_ids: str,
         output_dir: str,
     ) -> StoreConfig:
         dealership_id = dealership_id.strip()
@@ -211,6 +272,25 @@ class DealMakerGUI:
         except ValueError as exc:
             raise ValueError("Seed must be an integer") from exc
 
+        delivery_value = delivery.strip().lower() or "file"
+        if delivery_value not in {"file", "api", "both"}:
+            raise ValueError("Delivery must be file, api, or both")
+
+        api_url_value = normalize_delivery_url(api_url)
+        auth_token_value = auth_token.strip() or os.getenv("TOPREP_AUTH_TOKEN", "")
+        supabase_apikey_value = supabase_apikey.strip() or os.getenv("SUPABASE_ANON_KEY", "")
+
+        # Parse comma-separated rep IDs; empty = auto-fetch from Supabase at runtime
+        raw_ids = sales_rep_ids.strip() or os.getenv("TOPREP_SALES_REP_IDS", "")
+        rep_ids_list = [r.strip() for r in raw_ids.split(",") if r.strip()]
+
+        if delivery_value in {"api", "both"}:
+            validate_api_settings(
+                api_url=api_url_value,
+                auth_token=auth_token_value,
+                supabase_apikey=supabase_apikey_value,
+            )
+
         output_dir = output_dir.strip() or "output/stores"
         output_file = Path(output_dir) / f"{dealership_id}.jsonl"
 
@@ -223,6 +303,11 @@ class DealMakerGUI:
             batch_days=batch_days_int,
             every_seconds=every_seconds_int,
             seed=seed_int,
+            delivery=delivery_value,
+            api_url=api_url_value,
+            auth_token=auth_token_value,
+            supabase_apikey=supabase_apikey_value,
+            sales_rep_ids=rep_ids_list,
             output_file=output_file,
         )
 
@@ -241,6 +326,11 @@ class DealMakerGUI:
         batch_days_var = StringVar(value=self.batch_days_var.get())
         every_seconds_var = StringVar(value=self.every_seconds_var.get())
         seed_var = StringVar(value=self.seed_var.get())
+        delivery_var = StringVar(value=self.delivery_var.get())
+        api_url_var = StringVar(value=self.api_url_var.get())
+        auth_token_var = StringVar(value=self.auth_token_var.get())
+        supabase_apikey_var = StringVar(value=self.supabase_apikey_var.get())
+        sales_rep_ids_var = StringVar(value="")   # blank = auto-fetch from profiles
         output_dir_var = StringVar(value=self.output_dir_var.get())
 
         form = ttk.Frame(dialog, padding=12)
@@ -257,9 +347,14 @@ class DealMakerGUI:
         self._add_field(form, "Every Seconds", every_seconds_var, 2, 0)
         self._add_field(form, "Seed", seed_var, 2, 2)
         self._add_field(form, "Output Dir", output_dir_var, 2, 4)
+        self._add_field(form, "Delivery", delivery_var, 3, 0)
+        self._add_field(form, "API URL", api_url_var, 3, 2)
+        self._add_field(form, "Auth Token", auth_token_var, 3, 4)
+        self._add_field(form, "Supabase API Key", supabase_apikey_var, 4, 0)
+        self._add_field(form, "Rep IDs (blank=auto)", sales_rep_ids_var, 4, 2)
 
         button_row = ttk.Frame(form)
-        button_row.grid(row=3, column=0, columnspan=6, sticky="w", pady=(12, 0))
+        button_row.grid(row=5, column=0, columnspan=6, sticky="w", pady=(12, 0))
 
         def submit() -> None:
             self.add_store(
@@ -271,6 +366,11 @@ class DealMakerGUI:
                 batch_days=batch_days_var.get(),
                 every_seconds=every_seconds_var.get(),
                 seed=seed_var.get(),
+                delivery=delivery_var.get(),
+                api_url=api_url_var.get(),
+                auth_token=auth_token_var.get(),
+                supabase_apikey=supabase_apikey_var.get(),
+                sales_rep_ids=sales_rep_ids_var.get(),
                 output_dir=output_dir_var.get(),
             )
             if dealership_id_var.get().strip() in self.runners:
@@ -282,6 +382,10 @@ class DealMakerGUI:
                 self.batch_days_var.set(batch_days_var.get())
                 self.every_seconds_var.set(every_seconds_var.get())
                 self.seed_var.set(seed_var.get())
+                self.delivery_var.set(delivery_var.get())
+                self.api_url_var.set(api_url_var.get())
+                self.auth_token_var.set(auth_token_var.get())
+                self.supabase_apikey_var.set(supabase_apikey_var.get())
                 self.output_dir_var.set(output_dir_var.get())
                 dialog.destroy()
 
@@ -298,6 +402,11 @@ class DealMakerGUI:
         batch_days: str,
         every_seconds: str,
         seed: str,
+        delivery: str,
+        api_url: str,
+        auth_token: str,
+        supabase_apikey: str,
+        sales_rep_ids: str,
         output_dir: str,
     ) -> None:
         try:
@@ -310,6 +419,11 @@ class DealMakerGUI:
                 batch_days=batch_days,
                 every_seconds=every_seconds,
                 seed=seed,
+                delivery=delivery,
+                api_url=api_url,
+                auth_token=auth_token,
+                supabase_apikey=supabase_apikey,
+                sales_rep_ids=sales_rep_ids,
                 output_dir=output_dir,
             )
         except ValueError as err:
@@ -378,6 +492,7 @@ class DealMakerGUI:
                 values=(
                     dealership_id,
                     runner.status,
+                    config.delivery,
                     config.salespeople,
                     config.managers,
                     config.bdc_agents,
@@ -385,6 +500,7 @@ class DealMakerGUI:
                     config.every_seconds,
                     runner.events_written,
                     runner.last_write_at or "-",
+                    runner.last_api_error or "-",
                     str(config.output_file),
                 ),
             )
