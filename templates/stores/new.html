@@ -9,7 +9,21 @@
 <div class="alert alert--error">{{ error }}</div>
 {% endif %}
 
-<form method="POST" action="{{ url_for('stores.create_store') }}" class="form-card">
+<form method="POST" action="{{ url_for('stores.create_store') }}" class="form-card" id="store-form">
+
+  <!-- ── Store Template ────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Store Template</h2>
+    <p class="hint">Start from a preset or build your own. Selecting a template pre-fills the fields below — you can override anything.</p>
+    <div class="form-row">
+      <label for="store_template">Template</label>
+      <select id="store_template" name="store_template" onchange="applyTemplate(this.value)">
+        {% for key, tpl in store_templates.items() %}
+        <option value="{{ key }}" data-config='{{ tpl | tojson }}'>{{ tpl.label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </section>
 
   <!-- ── Identity ─────────────────────────────────────────────────────── -->
   <section class="form-section">
@@ -36,6 +50,30 @@
       <div class="form-row">
         <label for="bdc_agents">BDC Agents</label>
         <input id="bdc_agents" name="bdc_agents" type="number" value="3" min="0" />
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Rep Archetypes ────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Rep Archetypes (Sales Reps only)</h2>
+    <p class="hint">Allocate your sales reps across performance tiers. Total should equal the number of Sales Reps above, but any remainder defaults to Solid Mid.</p>
+    <div class="form-row-group">
+      <div class="form-row">
+        <label for="arch_rockstar">🌟 Rockstar <span class="muted">(2.5× close rate)</span></label>
+        <input id="arch_rockstar" name="arch_rockstar" type="number" value="1" min="0" />
+      </div>
+      <div class="form-row">
+        <label for="arch_solid_mid">✅ Solid Mid <span class="muted">(1.0× close rate)</span></label>
+        <input id="arch_solid_mid" name="arch_solid_mid" type="number" value="5" min="0" />
+      </div>
+      <div class="form-row">
+        <label for="arch_underperformer">⚠️ Underperformer <span class="muted">(0.3× close rate)</span></label>
+        <input id="arch_underperformer" name="arch_underperformer" type="number" value="1" min="0" />
+      </div>
+      <div class="form-row">
+        <label for="arch_new_hire">🆕 New Hire <span class="muted">(ramps 0.2× → 1.0× over 6 mo)</span></label>
+        <input id="arch_new_hire" name="arch_new_hire" type="number" value="1" min="0" />
       </div>
     </div>
   </section>
@@ -109,10 +147,10 @@
   <!-- ── Rep Behaviour ─────────────────────────────────────────────────── -->
   <section class="form-section">
     <h2>Rep Behaviour Weights</h2>
-    <p class="hint">These control the simulation's statistical tendencies for this store.</p>
+    <p class="hint">Store-level baseline; archetype multipliers are applied on top.</p>
     <div class="slider-grid">
       <div class="slider-row">
-        <label>Close Rate <span class="pct-label" id="close_rate_display">36%</span></label>
+        <label>Base Close Rate <span class="pct-label" id="close_rate_display">36%</span></label>
         <input type="range" name="close_rate_pct" min="5" max="80" value="36"
                oninput="document.getElementById('close_rate_display').textContent=this.value+'%'" />
       </div>
@@ -131,6 +169,34 @@
           <input id="activities_per_deal_max" name="activities_per_deal_max" type="number" value="6" min="1" />
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- ── Month Shape ───────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Month Shape</h2>
+    <p class="hint">Controls how leads are distributed across the month.</p>
+    <div class="form-row">
+      <label for="month_shape">Shape</label>
+      <select id="month_shape" name="month_shape">
+        <option value="flat">Flat (uniform) — default</option>
+        <option value="realistic">Realistic (back-loaded, last 5 days = 30–40% of deals)</option>
+        <option value="front_loaded">Front-Loaded (fleet / corporate accounts)</option>
+      </select>
+    </div>
+  </section>
+
+  <!-- ── Default Scenarios ─────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Default Stress Scenarios</h2>
+    <p class="hint">These scenarios are active on every simulation run unless overridden at run time.</p>
+    <div class="checkbox-grid">
+      {% for key in scenario_keys %}
+      <label class="checkbox-label">
+        <input type="checkbox" name="default_scenarios" value="{{ key }}" />
+        {{ key | replace('_', ' ') | title }}
+      </label>
+      {% endfor %}
     </div>
   </section>
 
@@ -171,4 +237,35 @@
   </div>
 
 </form>
+
+<script>
+const TEMPLATES = {
+  {% for key, tpl in store_templates.items() %}
+  "{{ key }}": {{ tpl | tojson }},
+  {% endfor %}
+};
+
+function applyTemplate(key) {
+  const t = TEMPLATES[key];
+  if (!t) return;
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
+  set('salespeople', t.salespeople);
+  set('managers', t.managers);
+  set('bdc_agents', t.bdc_agents);
+  set('daily_leads', t.daily_leads);
+  set('month_shape', t.month_shape);
+  if (t.archetype_dist) {
+    set('arch_rockstar', t.archetype_dist.rockstar ?? 0);
+    set('arch_solid_mid', t.archetype_dist.solid_mid ?? 0);
+    set('arch_underperformer', t.archetype_dist.underperformer ?? 0);
+    set('arch_new_hire', t.archetype_dist.new_hire ?? 0);
+  }
+  // Update close rate display
+  const crInput = document.querySelector('input[name="close_rate_pct"]');
+  if (crInput && t.close_rate_pct) {
+    crInput.value = t.close_rate_pct;
+    document.getElementById('close_rate_display').textContent = t.close_rate_pct + '%';
+  }
+}
+</script>
 {% endblock %}

@@ -27,6 +27,12 @@
       Events sent: <strong id="events-count">{{ store.events_sent }}</strong><br/>
       Last error: <span id="last-error" class="error-text">—</span>
     </p>
+    <div style="margin-top:12px">
+      <form method="POST" action="{{ url_for('stores.delete_store', store_id=store.dealership_id) }}"
+            onsubmit="return confirm('Delete store {{ store.dealership_id }}?')">
+        <button class="btn btn--sm btn--danger" type="submit">🗑 Delete Store</button>
+      </form>
+    </div>
   </section>
 
   <!-- ── Configuration summary ─── -->
@@ -37,9 +43,10 @@
       <tr><td>Leads / Day</td><td>{{ store.daily_leads }}</td></tr>
       <tr><td>Batch Days</td><td>{{ store.batch_days }}</td></tr>
       <tr><td>Loop Interval</td><td>{{ store.every_seconds }}s</td></tr>
-      <tr><td>Close Rate</td><td>{{ store.close_rate_pct }}%</td></tr>
+      <tr><td>Base Close Rate</td><td>{{ store.close_rate_pct }}%</td></tr>
       <tr><td>Status Advance</td><td>{{ store.status_advance_pct }}%</td></tr>
       <tr><td>Activities / Deal</td><td>{{ store.activities_per_deal_min }}–{{ store.activities_per_deal_max }}</td></tr>
+      <tr><td>Month Shape</td><td>{{ store.month_shape | default('flat') }}</td></tr>
     </table>
   </section>
 
@@ -51,6 +58,40 @@
       <tr><td>Managers</td><td>{{ store.managers }}</td></tr>
       <tr><td>BDC Agents</td><td>{{ store.bdc_agents }}</td></tr>
     </table>
+  </section>
+
+  <!-- ── Rep Archetypes ─── -->
+  <section class="card">
+    <h2>Rep Archetypes</h2>
+    {% set dist = store.archetype_dist | default({}) %}
+    <table class="table">
+      <thead><tr><th>Archetype</th><th>Count</th><th>Close Rate Mult</th><th>Pipeline Advance</th></tr></thead>
+      <tbody>
+        {% for key, cfg in archetypes.items() %}
+        <tr>
+          <td>{{ cfg.name }}</td>
+          <td>{{ dist.get(key, 0) }}</td>
+          <td>{{ cfg.close_rate_mult }}×</td>
+          <td>{{ (cfg.pipeline_advance_rate * 100) | round(0) | int }}%</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── Active Scenarios ─── -->
+  <section class="card">
+    <h2>Default Scenarios</h2>
+    {% set scenarios = store.default_scenarios | default([]) %}
+    {% if scenarios %}
+    <ul class="tag-list">
+      {% for sc in scenarios %}
+      <li class="tag tag--warning">{{ sc | replace('_',' ') | title }}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="hint">No default scenarios active. All simulation runs use base parameters.</p>
+    {% endif %}
   </section>
 
   <!-- ── Lead Sources ─── -->
@@ -81,6 +122,122 @@
       <li class="tag">{{ at | title }}</li>
       {% endfor %}
     </ul>
+  </section>
+
+  <!-- ── Historical Backfill ─── -->
+  <section class="card card--wide">
+    <h2>Historical Backfill</h2>
+    <p class="hint">Generate events for a date range and write to file (and optionally push to API).</p>
+    <form id="backfill-form" class="form-inline">
+      <div class="form-row-group">
+        <div class="form-row">
+          <label>Start Date</label>
+          <input type="date" name="start_date" id="bf-start" required />
+        </div>
+        <div class="form-row">
+          <label>End Date</label>
+          <input type="date" name="end_date" id="bf-end" required />
+        </div>
+        <div class="form-row">
+          <label>Month Shape</label>
+          <select name="month_shape">
+            <option value="flat" {% if store.month_shape == 'flat' %}selected{% endif %}>Flat</option>
+            <option value="realistic" {% if store.month_shape == 'realistic' %}selected{% endif %}>Realistic</option>
+            <option value="front_loaded" {% if store.month_shape == 'front_loaded' %}selected{% endif %}>Front-Loaded</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Delivery</label>
+          <select name="delivery">
+            <option value="file" {% if store.delivery == 'file' %}selected{% endif %}>File only</option>
+            <option value="api" {% if store.delivery == 'api' %}selected{% endif %}>API only</option>
+            <option value="both" {% if store.delivery == 'both' %}selected{% endif %}>File + API</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row" style="margin-top:8px">
+        <label>Override Scenarios</label>
+        <div class="checkbox-grid-inline">
+          {% for key in scenario_registry.keys() %}
+          <label class="checkbox-label">
+            <input type="checkbox" name="scenarios" value="{{ key }}"
+                   {% if key in (store.default_scenarios | default([])) %}checked{% endif %} />
+            {{ key | replace('_',' ') | title }}
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <button type="button" class="btn btn--primary" onclick="runBackfill()">⏮ Run Backfill</button>
+      </div>
+    </form>
+    <pre id="backfill-result" class="code-block" style="display:none"></pre>
+  </section>
+
+  <!-- ── Rep User Provisioning ─── -->
+  <section class="card card--wide">
+    <h2>QA Rep Provisioning</h2>
+    {% if not service_key_configured %}
+    <div class="alert alert--warning">
+      ⚠ <strong>SUPABASE_SERVICE_ROLE_KEY</strong> is not configured.
+      <a href="{{ url_for('settings.settings') }}">Go to Settings</a> to add it before provisioning.
+    </div>
+    {% endif %}
+    <div class="btn-row" style="margin-bottom:16px">
+      <button class="btn btn--primary" id="btn-provision"
+              {% if not service_key_configured %}disabled title="Service role key required"{% endif %}
+              onclick="provisionReps()">
+        👤 Provision Users
+      </button>
+      <button class="btn btn--danger" id="btn-deprovision"
+              {% if not service_key_configured %}disabled{% endif %}
+              onclick="deprovisionReps()">
+        🗑 Delete Users
+      </button>
+    </div>
+    <div id="provision-status" class="hint"></div>
+
+    {% if store.credentials %}
+    <details open>
+      <summary class="card-summary">QA Login Credentials ({{ store.credentials | length }} reps)</summary>
+      <div class="cred-actions">
+        <button class="btn btn--sm btn--ghost" onclick="copyCredentials()">📋 Copy all as JSON</button>
+        <button class="btn btn--sm btn--ghost" onclick="downloadCSV()">⬇ Download CSV</button>
+      </div>
+      <table class="table" id="cred-table">
+        <thead>
+          <tr><th>Rep Name</th><th>Archetype</th><th>Email</th><th>Password</th>
+          {% if toprep_url_configured %}<th>Login Link</th>{% endif %}
+          <th>Status</th></tr>
+        </thead>
+        <tbody>
+          {% for cred in store.credentials %}
+          <tr>
+            <td>{{ cred.rep_name }}</td>
+            <td><span class="tag">{{ cred.archetype | replace('_',' ') | title }}</span></td>
+            <td><code>{{ cred.email }}</code></td>
+            <td>
+              <span class="pwd-mask" data-pwd="{{ cred.password }}">••••••••••••••••</span>
+              <button class="btn btn--xs btn--ghost" onclick="togglePwd(this)">👁</button>
+            </td>
+            {% if toprep_url_configured %}
+            <td><a href="{{ toprep_app_url }}/login?email={{ cred.email | urlencode }}" target="_blank" class="link">Open ↗</a></td>
+            {% endif %}
+            <td>
+              {% if cred.error is defined and cred.error %}
+                <span class="error-text" title="{{ cred.error }}">❌ Error</span>
+              {% elif cred.user_id %}
+                <span class="success-text">✓ Created</span>
+              {% else %}
+                <span class="muted">—</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
   </section>
 
   <!-- ── Live Rep Profiles ─── -->
@@ -123,5 +280,86 @@ setInterval(() => {
     })
     .catch(() => {});
 }, 3000);
+
+function runBackfill() {
+  const form = document.getElementById('backfill-form');
+  const data = new FormData(form);
+  const result = document.getElementById('backfill-result');
+  result.style.display = 'block';
+  result.textContent = 'Running backfill…';
+  fetch('/stores/{{ store.dealership_id }}/backfill', { method: 'POST', body: data })
+    .then(r => r.json())
+    .then(d => { result.textContent = JSON.stringify(d, null, 2); })
+    .catch(e => { result.textContent = 'Error: ' + e; });
+}
+
+function provisionReps() {
+  const status = document.getElementById('provision-status');
+  status.textContent = 'Provisioning…';
+  fetch('/stores/{{ store.dealership_id }}/provision', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { status.textContent = '❌ ' + d.error; }
+      else { status.textContent = '✓ Provisioned ' + (d.credentials || []).length + ' reps. Reload page to see credentials.'; location.reload(); }
+    })
+    .catch(e => { status.textContent = 'Error: ' + e; });
+}
+
+function deprovisionReps() {
+  if (!confirm('Delete all provisioned users for this store?')) return;
+  const status = document.getElementById('provision-status');
+  status.textContent = 'Deleting…';
+  fetch('/stores/{{ store.dealership_id }}/deprovision', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { status.textContent = '❌ ' + d.error; }
+      else { status.textContent = '✓ Deleted ' + d.deleted + ' users. Errors: ' + (d.errors || []).length; location.reload(); }
+    })
+    .catch(e => { status.textContent = 'Error: ' + e; });
+}
+
+function togglePwd(btn) {
+  const span = btn.previousElementSibling;
+  if (span.textContent.startsWith('•')) {
+    span.textContent = span.dataset.pwd;
+    btn.textContent = '🙈';
+  } else {
+    span.textContent = '••••••••••••••••';
+    btn.textContent = '👁';
+  }
+}
+
+function copyCredentials() {
+  const creds = [];
+  document.querySelectorAll('#cred-table tbody tr').forEach(row => {
+    const cells = row.querySelectorAll('td');
+    creds.push({
+      rep_name: cells[0].textContent.trim(),
+      archetype: cells[1].textContent.trim(),
+      email: cells[2].textContent.trim(),
+      password: cells[3].querySelector('.pwd-mask').dataset.pwd,
+    });
+  });
+  navigator.clipboard.writeText(JSON.stringify(creds, null, 2));
+}
+
+function downloadCSV() {
+  const rows = [['rep_name','archetype','email','password']];
+  document.querySelectorAll('#cred-table tbody tr').forEach(row => {
+    const cells = row.querySelectorAll('td');
+    rows.push([
+      cells[0].textContent.trim(),
+      cells[1].textContent.trim(),
+      cells[2].textContent.trim(),
+      cells[3].querySelector('.pwd-mask').dataset.pwd,
+    ]);
+  });
+  const csv = rows.map(r => r.map(v => '"' + v.replace(/"/g, '""') + '"').join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '{{ store.dealership_id }}_credentials.csv';
+  a.click();
+}
 </script>
 {% endblock %}

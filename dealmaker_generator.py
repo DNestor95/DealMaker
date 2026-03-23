@@ -9,7 +9,7 @@ import random
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,201 @@ ACTIVITY_OUTCOMES = [
     "follow_up",
 ]
 DEAL_SOURCES = ["internet", "phone", "walk_in", "referral", "third_party"]
+
+# ---------------------------------------------------------------------------
+# Rep Archetypes
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ArchetypeConfig:
+    name: str
+    close_rate_mult: float
+    activity_mult: float
+    pipeline_advance_rate: float
+
+
+ARCHETYPES: dict[str, ArchetypeConfig] = {
+    "rockstar": ArchetypeConfig(
+        name="Rockstar",
+        close_rate_mult=2.5,
+        activity_mult=1.2,
+        pipeline_advance_rate=0.97,
+    ),
+    "solid_mid": ArchetypeConfig(
+        name="Solid Mid",
+        close_rate_mult=1.0,
+        activity_mult=1.0,
+        pipeline_advance_rate=0.88,
+    ),
+    "underperformer": ArchetypeConfig(
+        name="Underperformer",
+        close_rate_mult=0.3,
+        activity_mult=0.8,
+        pipeline_advance_rate=0.65,
+    ),
+    "new_hire": ArchetypeConfig(
+        name="New Hire (Ramping)",
+        close_rate_mult=0.2,   # base; ramped at simulation time via hire_date
+        activity_mult=0.7,     # base; ramped at simulation time
+        pipeline_advance_rate=0.55,
+    ),
+}
+
+_ARCHETYPE_ABBREV: dict[str, str] = {
+    "rockstar": "rock",
+    "solid_mid": "mid",
+    "underperformer": "under",
+    "new_hire": "new",
+}
+
+
+def _new_hire_mult(hire_date: date | None, sim_date: date) -> float:
+    """Compute ramp multiplier for a new hire: 0.2 → 1.0 over 6 months."""
+    if hire_date is None:
+        return 1.0
+    months = max(0, (sim_date.year - hire_date.year) * 12 + sim_date.month - hire_date.month)
+    return min(1.0, 0.2 + (months / 6.0) * 0.8)
+
+
+# ---------------------------------------------------------------------------
+# Month-Shape Weights
+# ---------------------------------------------------------------------------
+
+_MONTH_SHAPE_WEIGHTS: dict[str, list[tuple[int, int, float]]] = {
+    # (day_from, day_to_inclusive, weight)
+    "realistic": [
+        (1,  5,  0.6),
+        (6,  15, 0.8),
+        (16, 22, 1.0),
+        (23, 26, 1.5),
+        (27, 28, 2.2),
+        (29, 31, 3.5),
+    ],
+    "flat": [
+        (1, 31, 1.0),
+    ],
+    "front_loaded": [
+        (1,  5,  3.0),
+        (6,  10, 2.0),
+        (11, 20, 1.0),
+        (21, 31, 0.5),
+    ],
+}
+
+
+def daily_weight(day_of_month: int, month_shape: str = "flat") -> float:
+    """Return the relative weight for a given day-of-month under the chosen shape."""
+    buckets = _MONTH_SHAPE_WEIGHTS.get(month_shape, _MONTH_SHAPE_WEIGHTS["flat"])
+    for start, end, weight in buckets:
+        if start <= day_of_month <= end:
+            return weight
+    return 1.0
+
+
+# ---------------------------------------------------------------------------
+# Stress Scenarios
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScenarioConfig:
+    """Multipliers applied on top of base store parameters for a named scenario."""
+    lead_volume_mult: float = 1.0
+    close_rate_mult: float = 1.0
+    pipeline_advance_mult: float = 1.0
+    bdc_appt_set_prob_mult: float = 1.0
+    bdc_activity_volume_mult: float = 1.0
+    inventory_loss_prob: float | None = None   # if set, overrides vehicle_unavailable prob
+    deal_amount_floor_bump: int = 0            # added to deal_amount_min
+    manager_events_enabled: bool = True
+    # When a scenario stacks a simple multiplier on high_heat days
+    high_heat_day_lead_mult: float = 1.0
+    high_heat_day_count: int = 0              # first N days of sim get the mult
+
+
+SCENARIO_REGISTRY: dict[str, ScenarioConfig] = {
+    "slow_industry_month": ScenarioConfig(
+        lead_volume_mult=0.65,
+        close_rate_mult=0.85,
+    ),
+    "manager_on_vacation": ScenarioConfig(
+        pipeline_advance_mult=0.80,
+        manager_events_enabled=False,
+    ),
+    "bdc_underperforming": ScenarioConfig(
+        bdc_appt_set_prob_mult=0.25,
+        bdc_activity_volume_mult=0.5,
+    ),
+    "inventory_shortage": ScenarioConfig(
+        inventory_loss_prob=0.40,
+    ),
+    "strong_incentive_month": ScenarioConfig(
+        close_rate_mult=1.30,
+        deal_amount_floor_bump=2000,
+    ),
+    "high_heat_weekend": ScenarioConfig(
+        high_heat_day_lead_mult=2.5,
+        high_heat_day_count=2,
+    ),
+}
+
+
+def apply_scenarios(
+    base: ScenarioConfig,
+    scenario_keys: list[str],
+    overrides: dict[str, dict[str, Any]] | None = None,
+) -> ScenarioConfig:
+    """Merge scenario configs left-to-right onto base, then apply per-scenario field overrides."""
+    result = ScenarioConfig(
+        lead_volume_mult=base.lead_volume_mult,
+        close_rate_mult=base.close_rate_mult,
+        pipeline_advance_mult=base.pipeline_advance_mult,
+        bdc_appt_set_prob_mult=base.bdc_appt_set_prob_mult,
+        bdc_activity_volume_mult=base.bdc_activity_volume_mult,
+        inventory_loss_prob=base.inventory_loss_prob,
+        deal_amount_floor_bump=base.deal_amount_floor_bump,
+        manager_events_enabled=base.manager_events_enabled,
+        high_heat_day_lead_mult=base.high_heat_day_lead_mult,
+        high_heat_day_count=base.high_heat_day_count,
+    )
+
+    for key in scenario_keys:
+        sc = SCENARIO_REGISTRY.get(key)
+        if sc is None:
+            continue
+        # Apply user-level field overrides before merging
+        merged = ScenarioConfig(
+            lead_volume_mult=sc.lead_volume_mult,
+            close_rate_mult=sc.close_rate_mult,
+            pipeline_advance_mult=sc.pipeline_advance_mult,
+            bdc_appt_set_prob_mult=sc.bdc_appt_set_prob_mult,
+            bdc_activity_volume_mult=sc.bdc_activity_volume_mult,
+            inventory_loss_prob=sc.inventory_loss_prob,
+            deal_amount_floor_bump=sc.deal_amount_floor_bump,
+            manager_events_enabled=sc.manager_events_enabled,
+            high_heat_day_lead_mult=sc.high_heat_day_lead_mult,
+            high_heat_day_count=sc.high_heat_day_count,
+        )
+        if overrides and key in overrides:
+            for field_name, val in overrides[key].items():
+                if hasattr(merged, field_name):
+                    setattr(merged, field_name, val)
+
+        # Stack multipliers
+        result.lead_volume_mult *= merged.lead_volume_mult
+        result.close_rate_mult *= merged.close_rate_mult
+        result.pipeline_advance_mult *= merged.pipeline_advance_mult
+        result.bdc_appt_set_prob_mult *= merged.bdc_appt_set_prob_mult
+        result.bdc_activity_volume_mult *= merged.bdc_activity_volume_mult
+        result.deal_amount_floor_bump += merged.deal_amount_floor_bump
+        if not merged.manager_events_enabled:
+            result.manager_events_enabled = False
+        if merged.inventory_loss_prob is not None:
+            result.inventory_loss_prob = merged.inventory_loss_prob
+        if merged.high_heat_day_lead_mult != 1.0:
+            result.high_heat_day_lead_mult = merged.high_heat_day_lead_mult
+            result.high_heat_day_count = max(result.high_heat_day_count, merged.high_heat_day_count)
+
+    return result
 
 
 def load_env_file(env_path: str = ".env") -> None:
@@ -89,6 +284,8 @@ class TeamMember:
     member_id: str
     role: str
     name: str
+    archetype: str = "solid_mid"       # key into ARCHETYPES
+    hire_date: date | None = None       # used for New Hire ramp curve
 
 
 @dataclass
@@ -121,14 +318,35 @@ def random_business_time(day: datetime, rng: random.Random) -> datetime:
     return start + timedelta(minutes=minutes)
 
 
-def build_team(salespeople: int, managers: int, bdc_agents: int) -> list[TeamMember]:
+def build_team(
+    salespeople: int,
+    managers: int,
+    bdc_agents: int,
+    archetype_dist: dict[str, int] | None = None,
+) -> list[TeamMember]:
+    """Build a team roster.
+
+    ``archetype_dist`` maps archetype key → count for sales reps.  When
+    provided, the first N sales reps are tagged with that archetype (in
+    rockstar → solid_mid → underperformer → new_hire order).  Any
+    remainder receive "solid_mid".  Managers and BDC agents always receive
+    "solid_mid" (they don't have a meaningful close-rate archetype).
+    """
     team: list[TeamMember] = []
+
+    # Build ordered list of archetypes for sales reps
+    archetype_slots: list[str] = []
+    if archetype_dist:
+        for arch_key in ["rockstar", "solid_mid", "underperformer", "new_hire"]:
+            archetype_slots.extend([arch_key] * archetype_dist.get(arch_key, 0))
+
     for i in range(1, salespeople + 1):
-        team.append(TeamMember(member_id=f"S-{i:03d}", role="sales", name=f"Sales Rep {i}"))
+        arch = archetype_slots[i - 1] if i - 1 < len(archetype_slots) else "solid_mid"
+        team.append(TeamMember(member_id=f"S-{i:03d}", role="sales", name=f"Sales Rep {i}", archetype=arch))
     for i in range(1, managers + 1):
-        team.append(TeamMember(member_id=f"M-{i:03d}", role="manager", name=f"Manager {i}"))
+        team.append(TeamMember(member_id=f"M-{i:03d}", role="manager", name=f"Manager {i}", archetype="solid_mid"))
     for i in range(1, bdc_agents + 1):
-        team.append(TeamMember(member_id=f"B-{i:03d}", role="bdc", name=f"BDC Agent {i}"))
+        team.append(TeamMember(member_id=f"B-{i:03d}", role="bdc", name=f"BDC Agent {i}", archetype="solid_mid"))
     return team
 
 
@@ -191,17 +409,53 @@ def generate_deal_workflow(
     dealership_id: str,
     rng: random.Random,
     sales_rep_id_override: str | None = None,
+    base_close_rate: float = 0.36,
+    deal_amount_min: int = 12000,
+    deal_amount_max: int = 68000,
+    gross_profit_min: int = 700,
+    gross_profit_max: int = 6000,
+    activities_min: int = 2,
+    activities_max: int = 6,
+    scenario: ScenarioConfig | None = None,
 ) -> list[Event]:
     events: list[Event] = []
+    sc = scenario or ScenarioConfig()
 
     created_ts = random_business_time(day, rng)
     sales_member = pick_member(team, "sales", rng)
     manager_member = pick_member(team, "manager", rng)
 
+    # --- Archetype multipliers ---
+    arch = ARCHETYPES.get(sales_member.archetype, ARCHETYPES["solid_mid"])
+    if sales_member.archetype == "new_hire":
+        ramp = _new_hire_mult(sales_member.hire_date, day.date())
+        close_rate_mult = arch.close_rate_mult + (1.0 - arch.close_rate_mult) * ramp
+        activity_mult = arch.activity_mult + (1.0 - arch.activity_mult) * ramp
+        pipeline_advance_rate = arch.pipeline_advance_rate + (ARCHETYPES["solid_mid"].pipeline_advance_rate - arch.pipeline_advance_rate) * ramp
+    else:
+        close_rate_mult = arch.close_rate_mult
+        activity_mult = arch.activity_mult
+        pipeline_advance_rate = arch.pipeline_advance_rate
+
+    # Apply scenario multipliers
+    effective_close_rate = base_close_rate * close_rate_mult * sc.close_rate_mult
+    effective_close_rate = min(1.0, max(0.0, effective_close_rate))
+    effective_pipeline_rate = pipeline_advance_rate * sc.pipeline_advance_mult
+    effective_pipeline_rate = min(1.0, max(0.0, effective_pipeline_rate))
+
+    # Activities per deal
+    raw_activity_count = rng.randint(activities_min, activities_max)
+    bdc_mult = sc.bdc_activity_volume_mult if sales_member.role == "bdc" else 1.0
+    activity_count = max(1, round(raw_activity_count * activity_mult * bdc_mult))
+
     deal_id = stable_uuid("deal", dealership_id, day.strftime("%Y%m%d"), str(deal_number))
     customer_name = f"Customer {deal_number:05d}"
-    deal_amount = rng.randint(12000, 68000)
-    gross_profit = rng.randint(700, 6000)
+
+    effective_amount_min = deal_amount_min + sc.deal_amount_floor_bump
+    # Ensure min < max to avoid randint errors when scenario bumps floor above configured max
+    safe_amount_max = max(effective_amount_min + 1, deal_amount_max)
+    deal_amount = rng.randint(max(1, effective_amount_min), safe_amount_max)
+    gross_profit = rng.randint(gross_profit_min, max(gross_profit_min + 1, gross_profit_max))
 
     events.append(
         make_event(
@@ -225,7 +479,7 @@ def generate_deal_workflow(
     status_path = ["qualified", "proposal", "negotiation"]
 
     for next_status in status_path:
-        if rng.random() < 0.88:
+        if rng.random() < effective_pipeline_rate:
             events.append(
                 make_event(
                     ts=status_ts,
@@ -243,7 +497,6 @@ def generate_deal_workflow(
             current_status = next_status
             status_ts += timedelta(minutes=rng.randint(15, 90))
 
-    activity_count = rng.randint(2, 6)
     for activity_index in range(1, activity_count + 1):
         activity_type = rng.choice(ACTIVITY_TYPES)
         activity_id = stable_uuid("activity", deal_id, str(activity_index))
@@ -286,7 +539,7 @@ def generate_deal_workflow(
             )
         )
 
-    close_won = rng.random() < 0.36
+    close_won = rng.random() < effective_close_rate
     close_ts = status_ts + timedelta(minutes=rng.randint(30, 240))
     if close_won:
         events.append(
@@ -305,7 +558,11 @@ def generate_deal_workflow(
             )
         )
     else:
-        reason = rng.choice(["price", "timing", "credit", "vehicle_unavailable", "no_response"])
+        base_reasons = ["price", "timing", "credit", "vehicle_unavailable", "no_response"]
+        if sc.inventory_loss_prob is not None and rng.random() < sc.inventory_loss_prob:
+            reason = "vehicle_unavailable"
+        else:
+            reason = rng.choice(base_reasons)
         events.append(
             make_event(
                 ts=close_ts,
@@ -322,7 +579,7 @@ def generate_deal_workflow(
             )
         )
 
-    if rng.random() < 0.06:
+    if sc.manager_events_enabled and rng.random() < 0.06:
         month = day.strftime("%Y-%m")
         old_quota = rng.randint(30, 80)
         new_quota = max(1, old_quota + rng.randint(-10, 15))
@@ -354,10 +611,27 @@ def generate_events(
     seed: int,
     sales_rep_id_override: str | None = None,
     sales_rep_ids: list[str] | None = None,
+    base_close_rate: float = 0.36,
+    deal_amount_min: int = 12000,
+    deal_amount_max: int = 68000,
+    gross_profit_min: int = 700,
+    gross_profit_max: int = 6000,
+    activities_min: int = 2,
+    activities_max: int = 6,
+    month_shape: str = "flat",
+    scenarios: list[str] | None = None,
+    scenario_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> list[Event]:
     rng = random.Random(seed)
     events: list[Event] = []
     deal_counter = 1
+
+    # Resolve scenario config
+    base_sc = ScenarioConfig()
+    sc = apply_scenarios(base_sc, scenarios or [], scenario_overrides)
+
+    # Effective daily_leads after slow/fast scenario
+    effective_daily_leads = daily_leads * sc.lead_volume_mult
 
     # Build rep rotation pool: explicit list > single override > generated UUIDs
     rep_pool: list[str] | None = None
@@ -366,9 +640,25 @@ def generate_events(
     elif sales_rep_id_override:
         rep_pool = [sales_rep_id_override]
 
+    # Pre-compute per-day weights for the month-shape distribution
+    # We normalise so total_weighted_days * normalised_weight == days
+    day_weights: list[float] = []
     for day_offset in range(days):
         day = start_date + timedelta(days=day_offset)
-        leads_today = max(1, int(rng.gauss(daily_leads, max(2.0, daily_leads * 0.25))))
+        w = daily_weight(day.day, month_shape)
+        # High-heat weekend: first N days get extra leads
+        if sc.high_heat_day_count > 0 and day_offset < sc.high_heat_day_count:
+            w *= sc.high_heat_day_lead_mult
+        day_weights.append(w)
+
+    total_weight = sum(day_weights) or 1.0
+    total_leads_target = effective_daily_leads * days
+
+    for day_offset in range(days):
+        day = start_date + timedelta(days=day_offset)
+        # Scale daily leads by shape weight
+        scaled_mean = total_leads_target * day_weights[day_offset] / total_weight
+        leads_today = max(1, int(rng.gauss(scaled_mean, max(2.0, scaled_mean * 0.25))))
         for _ in range(leads_today):
             # Round-robin: each new deal goes to the next rep in the pool
             assigned = rep_pool[(deal_counter - 1) % len(rep_pool)] if rep_pool else None
@@ -380,6 +670,14 @@ def generate_events(
                     dealership_id=dealership_id,
                     rng=rng,
                     sales_rep_id_override=assigned,
+                    base_close_rate=base_close_rate,
+                    deal_amount_min=deal_amount_min,
+                    deal_amount_max=deal_amount_max,
+                    gross_profit_min=gross_profit_min,
+                    gross_profit_max=gross_profit_max,
+                    activities_min=activities_min,
+                    activities_max=activities_max,
+                    scenario=sc,
                 )
             )
             deal_counter += 1

@@ -5,22 +5,79 @@ GET  /              → list all configured stores
 GET  /stores/new    → new store form
 POST /stores/new    → create store + seed initial data into TopRep DB
 GET  /stores/<id>   → store detail / live stats
-POST /stores/<id>/start  → start background simulation for store
-POST /stores/<id>/stop   → stop simulation for store
-DELETE /stores/<id>      → remove store from session
+POST /stores/<id>/delete      → remove store from session + persistence
+POST /stores/<id>/backfill    → generate historical data for a date range
+POST /stores/<id>/provision   → provision QA auth users for all reps
+POST /stores/<id>/deprovision → delete provisioned auth users
 """
 from __future__ import annotations
 
-from flask import Blueprint, redirect, render_template, request, session, url_for
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 
-from app.supabase_client import get_profiles, rest_get
+from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
+
+from app.supabase_client import (
+    deprovision_store_reps,
+    get_profiles,
+    priors_from_archetypes,
+    provision_store_reps,
+    rest_get,
+    seed_source_stage_priors,
+)
 
 bp = Blueprint("stores", __name__)
 
 # ---------------------------------------------------------------------------
-# In-memory store registry (replace with DB persistence in a later iteration)
+# Persistence helpers
 # ---------------------------------------------------------------------------
-_stores: dict[str, dict] = {}
+_STORES_FILE = Path(__file__).parent.parent.parent / "output" / "stores_config.json"
+
+
+def _load_stores() -> dict[str, dict]:
+    if _STORES_FILE.exists():
+        try:
+            data = json.loads(_STORES_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def _save_stores(stores: dict[str, dict]) -> None:
+    _STORES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _STORES_FILE.write_text(json.dumps(stores, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# In-memory store registry (backed by JSON file)
+# ---------------------------------------------------------------------------
+_stores: dict[str, dict] = _load_stores()
+
+# Reset runtime-only fields on startup
+for _s in _stores.values():
+    _s["status"] = "stopped"
+    _s.setdefault("events_sent", 0)
+    _s.setdefault("credentials", [])
+
+
+STORE_TEMPLATES = {
+    "custom": {"label": "Custom (blank)", "salespeople": 8, "managers": 2, "bdc_agents": 3,
+               "daily_leads": 20, "close_rate_pct": 36, "month_shape": "flat",
+               "archetype_dist": {"rockstar": 1, "solid_mid": 5, "underperformer": 1, "new_hire": 1}},
+    "high_volume_internet": {"label": "High-Volume Internet Store", "salespeople": 12, "managers": 3,
+                             "bdc_agents": 5, "daily_leads": 40, "close_rate_pct": 30, "month_shape": "realistic",
+                             "archetype_dist": {"rockstar": 2, "solid_mid": 7, "underperformer": 2, "new_hire": 1}},
+    "rural_walkin": {"label": "Rural Walk-In Store", "salespeople": 4, "managers": 1, "bdc_agents": 1,
+                     "daily_leads": 8, "close_rate_pct": 45, "month_shape": "realistic",
+                     "archetype_dist": {"rockstar": 1, "solid_mid": 2, "underperformer": 1, "new_hire": 0}},
+    "bdc_heavy_phone": {"label": "BDC-Heavy Phone Store", "salespeople": 6, "managers": 2, "bdc_agents": 8,
+                        "daily_leads": 25, "close_rate_pct": 33, "month_shape": "realistic",
+                        "archetype_dist": {"rockstar": 1, "solid_mid": 4, "underperformer": 1, "new_hire": 0}},
+}
 
 
 @bp.route("/")
@@ -40,6 +97,10 @@ def new_store():
             "showed", "no_show", "sold", "lost", "negotiating", "follow_up",
         ],
         rep_roles=["sales_rep", "manager", "bdc"],
+        store_templates=STORE_TEMPLATES,
+        scenario_keys=["slow_industry_month", "manager_on_vacation", "bdc_underperforming",
+                       "inventory_shortage", "strong_incentive_month", "high_heat_weekend"],
+        month_shapes=["flat", "realistic", "front_loaded"],
     )
 
 
@@ -49,7 +110,24 @@ def create_store():
 
     store_id = data.get("dealership_id", "").strip()
     if not store_id:
-        return render_template("stores/new.html", error="Dealership ID is required.")
+        return render_template("stores/new.html", error="Dealership ID is required.",
+                               lead_sources=["internet", "phone", "showroom", "referral", "service", "walkin"],
+                               deal_statuses=["lead", "qualified", "proposal", "negotiation", "closed_won", "closed_lost"],
+                               activity_types=["call", "email", "meeting", "demo", "note"],
+                               activity_outcomes=["connected", "no_answer", "left_vm", "appt_set",
+                                                  "showed", "no_show", "sold", "lost", "negotiating", "follow_up"],
+                               rep_roles=["sales_rep", "manager", "bdc"],
+                               store_templates=STORE_TEMPLATES,
+                               scenario_keys=["slow_industry_month", "manager_on_vacation", "bdc_underperforming",
+                                              "inventory_shortage", "strong_incentive_month", "high_heat_weekend"],
+                               month_shapes=["flat", "realistic", "front_loaded"])
+
+    archetype_dist = {
+        "rockstar": int(data.get("arch_rockstar", 1)),
+        "solid_mid": int(data.get("arch_solid_mid", 5)),
+        "underperformer": int(data.get("arch_underperformer", 1)),
+        "new_hire": int(data.get("arch_new_hire", 1)),
+    }
 
     store = {
         "dealership_id": store_id,
@@ -66,11 +144,16 @@ def create_store():
         "deal_amount_max": int(data.get("deal_amount_max", 68000)),
         "gross_profit_min": int(data.get("gross_profit_min", 700)),
         "gross_profit_max": int(data.get("gross_profit_max", 6000)),
-        # rep behaviour weights (0-100 sliders, used to bias simulation)
+        # rep behaviour weights
         "close_rate_pct": int(data.get("close_rate_pct", 36)),
         "status_advance_pct": int(data.get("status_advance_pct", 88)),
         "activities_per_deal_min": int(data.get("activities_per_deal_min", 2)),
         "activities_per_deal_max": int(data.get("activities_per_deal_max", 6)),
+        # archetype distribution
+        "archetype_dist": archetype_dist,
+        # month shape + scenarios
+        "month_shape": data.get("month_shape", "flat"),
+        "default_scenarios": data.getlist("default_scenarios"),
         # delivery
         "delivery": data.get("delivery", "file"),
         "batch_days": int(data.get("batch_days", 1)),
@@ -79,9 +162,21 @@ def create_store():
         # status
         "status": "stopped",
         "events_sent": 0,
+        "credentials": [],
     }
 
     _stores[store_id] = store
+    _save_stores(_stores)
+
+    # Auto-seed Bayesian priors if connected
+    if os.getenv("TOPREP_API_URL"):
+        prior_rows = priors_from_archetypes(
+            store_id=store_id,
+            sources=store["lead_sources"],
+            stages=[s for s in store["deal_statuses"] if s not in ("closed_won", "closed_lost")],
+        )
+        seed_source_stage_priors(store_id, prior_rows)
+
     return redirect(url_for("stores.store_detail", store_id=store_id))
 
 
@@ -95,4 +190,130 @@ def store_detail(store_id: str):
     profiles = get_profiles()
     store_profiles = [p for p in profiles if p.get("store_id") == store_id]
 
-    return render_template("stores/detail.html", store=store, profiles=store_profiles)
+    service_key_configured = bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""))
+    toprep_url_configured = bool(os.getenv("TOPREP_APP_URL", ""))
+    toprep_app_url = os.getenv("TOPREP_APP_URL", "").rstrip("/")
+
+    from dealmaker_generator import ARCHETYPES, SCENARIO_REGISTRY
+    return render_template(
+        "stores/detail.html",
+        store=store,
+        profiles=store_profiles,
+        archetypes=ARCHETYPES,
+        scenario_registry=SCENARIO_REGISTRY,
+        service_key_configured=service_key_configured,
+        toprep_url_configured=toprep_url_configured,
+        toprep_app_url=toprep_app_url,
+    )
+
+
+@bp.route("/stores/<store_id>/delete", methods=["POST"])
+def delete_store(store_id: str):
+    _stores.pop(store_id, None)
+    _save_stores(_stores)
+    flash(f"Store '{store_id}' deleted.", "info")
+    return redirect(url_for("stores.index"))
+
+
+@bp.route("/stores/<store_id>/backfill", methods=["POST"])
+def backfill_store(store_id: str):
+    """Generate historical events for a date range and write to file / push to API."""
+    store = _stores.get(store_id)
+    if not store:
+        return jsonify({"error": "Store not found"}), 404
+
+    start_str = request.form.get("start_date", "")
+    end_str = request.form.get("end_date", "")
+    try:
+        start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+
+    days = max(1, (end_dt - start_dt).days + 1)
+
+    import sys
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
+    from dealmaker_generator import build_team, generate_events
+
+    team = build_team(
+        salespeople=store["salespeople"],
+        managers=store["managers"],
+        bdc_agents=store["bdc_agents"],
+        archetype_dist=store.get("archetype_dist"),
+    )
+
+    scenarios = request.form.getlist("scenarios") or store.get("default_scenarios", [])
+    month_shape = request.form.get("month_shape", store.get("month_shape", "flat"))
+    delivery = request.form.get("delivery", store.get("delivery", "file"))
+
+    events = generate_events(
+        start_date=start_dt,
+        days=days,
+        daily_leads=store["daily_leads"],
+        team=team,
+        dealership_id=store_id,
+        seed=store["seed"],
+        base_close_rate=store["close_rate_pct"] / 100.0,
+        deal_amount_min=store["deal_amount_min"],
+        deal_amount_max=store["deal_amount_max"],
+        gross_profit_min=store["gross_profit_min"],
+        gross_profit_max=store["gross_profit_max"],
+        activities_min=store["activities_per_deal_min"],
+        activities_max=store["activities_per_deal_max"],
+        month_shape=month_shape,
+        scenarios=scenarios,
+    )
+
+    output_dir = _Path("output/stores")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_file = output_dir / f"{store_id}_backfill_{start_str}_{end_str}.jsonl"
+    with out_file.open("w", encoding="utf-8") as fh:
+        for ev in events:
+            fh.write(json.dumps(ev.to_dict(), separators=(",", ":")) + "\n")
+
+    errors_count = 0
+    if delivery in {"api", "both"}:
+        from app.supabase_client import post_event
+        for ev in events:
+            result = post_event(ev.to_dict())
+            if "error" in result:
+                errors_count += 1
+
+    return jsonify({
+        "events": len(events),
+        "days": days,
+        "file": str(out_file),
+        "api_errors": errors_count if delivery in {"api", "both"} else None,
+    })
+
+
+@bp.route("/stores/<store_id>/provision", methods=["POST"])
+def provision_reps(store_id: str):
+    store = _stores.get(store_id)
+    if not store:
+        return jsonify({"error": "Store not found"}), 404
+
+    if not os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+        return jsonify({"error": "SUPABASE_SERVICE_ROLE_KEY not configured in Settings"}), 400
+
+    credentials = provision_store_reps(store)
+    store["credentials"] = credentials
+    _save_stores(_stores)
+    return jsonify({"credentials": credentials})
+
+
+@bp.route("/stores/<store_id>/deprovision", methods=["POST"])
+def deprovision_reps(store_id: str):
+    store = _stores.get(store_id)
+    if not store:
+        return jsonify({"error": "Store not found"}), 404
+
+    if not os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+        return jsonify({"error": "SUPABASE_SERVICE_ROLE_KEY not configured in Settings"}), 400
+
+    result = deprovision_store_reps(store_id)
+    store["credentials"] = []
+    _save_stores(_stores)
+    return jsonify(result)
