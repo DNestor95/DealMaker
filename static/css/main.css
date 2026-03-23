@@ -223,13 +223,64 @@ body {
   font-size: 12px;
   color: var(--muted);
 }
+.tag--warning {
+  background: rgba(251,191,36,.08);
+  border-color: var(--warning);
+  color: var(--warning);
+}
 
 /* ── Misc ───────────────────────────────────────────────────────────── */
 .hint       { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 .req        { color: var(--danger); }
 .meta       { font-size: 12px; color: var(--muted); margin-top: 10px; }
 .error-text { color: var(--danger); }
+.success-text { color: var(--success); }
+.muted      { color: var(--muted); }
+.link       { color: var(--primary); text-decoration: none; }
+.link:hover { text-decoration: underline; }
 .empty-state { text-align: center; padding: 80px 0; color: var(--muted); }
 .empty-state h1 { font-size: 48px; margin-bottom: 12px; }
 .empty-state p  { margin-bottom: 20px; }
 code { background: var(--bg); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+/* ── Alert warning ──────────────────────────────────────────────────── */
+.alert--warning { background: #2d2200; border: 1px solid var(--warning); color: var(--warning); }
+.alert--info    { background: #0d1e3a; border: 1px solid var(--primary);  color: var(--primary); }
+
+/* ── Code block / pre ───────────────────────────────────────────────── */
+.code-block {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  font-size: 12px;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 12px;
+  color: var(--text);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* ── Credential section ─────────────────────────────────────────────── */
+.cred-actions { display: flex; gap: 8px; margin-bottom: 12px; }
+.card-summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  padding: 8px 0;
+}
+.btn--xs { padding: 2px 7px; font-size: 11px; }
+
+/* ── Inline checkbox grid ───────────────────────────────────────────── */
+.checkbox-grid-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* ── Form inline ────────────────────────────────────────────────────── */
+.form-inline .form-row-group { margin-bottom: 12px; }

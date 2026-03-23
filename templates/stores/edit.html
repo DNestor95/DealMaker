@@ -1,39 +1,23 @@
 {% extends "base.html" %}
-{% block title %}— New Store{% endblock %}
+{% block title %}— Edit {{ store.dealership_id }}{% endblock %}
 {% block content %}
 <div class="page-header">
-  <h1>Create New Store</h1>
+  <h1>Edit Store — <span style="color:var(--primary)">{{ store.dealership_id }}</span></h1>
 </div>
 
-{% if error %}
-<div class="alert alert--error">{{ error }}</div>
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="alert alert--{{ category }}">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
+{% if store.status == 'running' %}
+<div class="alert alert--warning">
+  ⚠ This store is currently running. Saving will stop the simulation automatically. You can restart it from the store detail page.
+</div>
 {% endif %}
 
-<form method="POST" action="{{ url_for('stores.create_store') }}" class="form-card" id="store-form">
-
-  <!-- ── Store Template ────────────────────────────────────────────────── -->
-  <section class="form-section">
-    <h2>Store Template</h2>
-    <p class="hint">Start from a preset or build your own. Selecting a template pre-fills the fields below — you can override anything.</p>
-    <div class="form-row">
-      <label for="store_template">Template</label>
-      <select id="store_template" name="store_template" onchange="applyTemplate(this.value)">
-        {% for key, tpl in store_templates.items() %}
-        <option value="{{ key }}" data-config='{{ tpl | tojson }}'>{{ tpl.label }}</option>
-        {% endfor %}
-      </select>
-    </div>
-  </section>
-
-  <!-- ── Identity ─────────────────────────────────────────────────────── -->
-  <section class="form-section">
-    <h2>Identity</h2>
-    <div class="form-row">
-      <label for="dealership_id">Dealership ID <span class="req">*</span></label>
-      <input id="dealership_id" name="dealership_id" type="text"
-             placeholder="DLR-001" required />
-    </div>
-  </section>
+<form method="POST" action="{{ url_for('stores.update_store', store_id=store.dealership_id) }}" class="form-card" id="store-form">
 
   <!-- ── Team Composition ──────────────────────────────────────────────── -->
   <section class="form-section">
@@ -41,39 +25,47 @@
     <div class="form-row-group">
       <div class="form-row">
         <label for="salespeople">Sales Reps</label>
-        <input id="salespeople" name="salespeople" type="number" value="8" min="1" />
+        <input id="salespeople" name="salespeople" type="number"
+               value="{{ store.salespeople }}" min="1" />
       </div>
       <div class="form-row">
         <label for="managers">Managers</label>
-        <input id="managers" name="managers" type="number" value="2" min="1" />
+        <input id="managers" name="managers" type="number"
+               value="{{ store.managers }}" min="1" />
       </div>
       <div class="form-row">
         <label for="bdc_agents">BDC Agents</label>
-        <input id="bdc_agents" name="bdc_agents" type="number" value="3" min="0" />
+        <input id="bdc_agents" name="bdc_agents" type="number"
+               value="{{ store.bdc_agents }}" min="0" />
       </div>
     </div>
   </section>
 
   <!-- ── Rep Archetypes ────────────────────────────────────────────────── -->
+  {% set dist = store.archetype_dist | default({}) %}
   <section class="form-section">
     <h2>Rep Archetypes (Sales Reps only)</h2>
-    <p class="hint">Allocate your sales reps across performance tiers. Total should equal the number of Sales Reps above, but any remainder defaults to Solid Mid.</p>
+    <p class="hint">Allocate your sales reps across performance tiers. Any remainder beyond the total defaults to Solid Mid.</p>
     <div class="form-row-group">
       <div class="form-row">
         <label for="arch_rockstar">🌟 Rockstar <span class="muted">(2.5× close rate)</span></label>
-        <input id="arch_rockstar" name="arch_rockstar" type="number" value="1" min="0" />
+        <input id="arch_rockstar" name="arch_rockstar" type="number"
+               value="{{ dist.get('rockstar', 1) }}" min="0" />
       </div>
       <div class="form-row">
         <label for="arch_solid_mid">✅ Solid Mid <span class="muted">(1.0× close rate)</span></label>
-        <input id="arch_solid_mid" name="arch_solid_mid" type="number" value="5" min="0" />
+        <input id="arch_solid_mid" name="arch_solid_mid" type="number"
+               value="{{ dist.get('solid_mid', 5) }}" min="0" />
       </div>
       <div class="form-row">
         <label for="arch_underperformer">⚠️ Underperformer <span class="muted">(0.3× close rate)</span></label>
-        <input id="arch_underperformer" name="arch_underperformer" type="number" value="1" min="0" />
+        <input id="arch_underperformer" name="arch_underperformer" type="number"
+               value="{{ dist.get('underperformer', 1) }}" min="0" />
       </div>
       <div class="form-row">
         <label for="arch_new_hire">🆕 New Hire <span class="muted">(ramps 0.2× → 1.0× over 6 mo)</span></label>
-        <input id="arch_new_hire" name="arch_new_hire" type="number" value="1" min="0"
+        <input id="arch_new_hire" name="arch_new_hire" type="number"
+               value="{{ dist.get('new_hire', 0) }}" min="0"
                oninput="renderHireDates(parseInt(this.value)||0)" />
       </div>
     </div>
@@ -90,7 +82,7 @@
       {% for src in lead_sources %}
       <label class="checkbox-label">
         <input type="checkbox" name="lead_sources" value="{{ src }}"
-               {% if src in ['internet','phone','showroom'] %}checked{% endif %} />
+               {% if src in store.lead_sources %}checked{% endif %} />
         {{ src | replace('_', ' ') | title }}
       </label>
       {% endfor %}
@@ -104,7 +96,8 @@
     <div class="checkbox-grid">
       {% for status in deal_statuses %}
       <label class="checkbox-label">
-        <input type="checkbox" name="deal_statuses" value="{{ status }}" checked />
+        <input type="checkbox" name="deal_statuses" value="{{ status }}"
+               {% if status in store.deal_statuses %}checked{% endif %} />
         {{ status | replace('_', ' ') | title }}
       </label>
       {% endfor %}
@@ -118,7 +111,8 @@
     <div class="checkbox-grid">
       {% for atype in activity_types %}
       <label class="checkbox-label">
-        <input type="checkbox" name="activity_types" value="{{ atype }}" checked />
+        <input type="checkbox" name="activity_types" value="{{ atype }}"
+               {% if atype in store.activity_types %}checked{% endif %} />
         {{ atype | title }}
       </label>
       {% endfor %}
@@ -131,19 +125,23 @@
     <div class="form-row-group">
       <div class="form-row">
         <label for="deal_amount_min">Deal Amount Min ($)</label>
-        <input id="deal_amount_min" name="deal_amount_min" type="number" value="12000" min="1000" />
+        <input id="deal_amount_min" name="deal_amount_min" type="number"
+               value="{{ store.deal_amount_min }}" min="1000" />
       </div>
       <div class="form-row">
         <label for="deal_amount_max">Deal Amount Max ($)</label>
-        <input id="deal_amount_max" name="deal_amount_max" type="number" value="68000" min="1000" />
+        <input id="deal_amount_max" name="deal_amount_max" type="number"
+               value="{{ store.deal_amount_max }}" min="1000" />
       </div>
       <div class="form-row">
         <label for="gross_profit_min">Gross Profit Min ($)</label>
-        <input id="gross_profit_min" name="gross_profit_min" type="number" value="700" min="0" />
+        <input id="gross_profit_min" name="gross_profit_min" type="number"
+               value="{{ store.gross_profit_min }}" min="0" />
       </div>
       <div class="form-row">
         <label for="gross_profit_max">Gross Profit Max ($)</label>
-        <input id="gross_profit_max" name="gross_profit_max" type="number" value="6000" min="0" />
+        <input id="gross_profit_max" name="gross_profit_max" type="number"
+               value="{{ store.gross_profit_max }}" min="0" />
       </div>
     </div>
   </section>
@@ -154,23 +152,27 @@
     <p class="hint">Store-level baseline; archetype multipliers are applied on top.</p>
     <div class="slider-grid">
       <div class="slider-row">
-        <label>Base Close Rate <span class="pct-label" id="close_rate_display">36%</span></label>
-        <input type="range" name="close_rate_pct" min="5" max="80" value="36"
+        <label>Base Close Rate <span class="pct-label" id="close_rate_display">{{ store.close_rate_pct }}%</span></label>
+        <input type="range" name="close_rate_pct" min="5" max="80"
+               value="{{ store.close_rate_pct }}"
                oninput="document.getElementById('close_rate_display').textContent=this.value+'%'" />
       </div>
       <div class="slider-row">
-        <label>Status Advance Rate <span class="pct-label" id="advance_display">88%</span></label>
-        <input type="range" name="status_advance_pct" min="20" max="100" value="88"
+        <label>Status Advance Rate <span class="pct-label" id="advance_display">{{ store.status_advance_pct }}%</span></label>
+        <input type="range" name="status_advance_pct" min="20" max="100"
+               value="{{ store.status_advance_pct }}"
                oninput="document.getElementById('advance_display').textContent=this.value+'%'" />
       </div>
       <div class="form-row-group">
         <div class="form-row">
           <label for="activities_per_deal_min">Activities / Deal (min)</label>
-          <input id="activities_per_deal_min" name="activities_per_deal_min" type="number" value="2" min="1" />
+          <input id="activities_per_deal_min" name="activities_per_deal_min" type="number"
+                 value="{{ store.activities_per_deal_min }}" min="1" />
         </div>
         <div class="form-row">
           <label for="activities_per_deal_max">Activities / Deal (max)</label>
-          <input id="activities_per_deal_max" name="activities_per_deal_max" type="number" value="6" min="1" />
+          <input id="activities_per_deal_max" name="activities_per_deal_max" type="number"
+                 value="{{ store.activities_per_deal_max }}" min="1" />
         </div>
       </div>
     </div>
@@ -183,9 +185,9 @@
     <div class="form-row">
       <label for="month_shape">Shape</label>
       <select id="month_shape" name="month_shape">
-        <option value="flat">Flat (uniform) — default</option>
-        <option value="realistic">Realistic (back-loaded, last 5 days = 30–40% of deals)</option>
-        <option value="front_loaded">Front-Loaded (fleet / corporate accounts)</option>
+        <option value="flat" {% if store.month_shape == 'flat' %}selected{% endif %}>Flat (uniform) — default</option>
+        <option value="realistic" {% if store.month_shape == 'realistic' %}selected{% endif %}>Realistic (back-loaded, last 5 days = 30–40% of deals)</option>
+        <option value="front_loaded" {% if store.month_shape == 'front_loaded' %}selected{% endif %}>Front-Loaded (fleet / corporate accounts)</option>
       </select>
     </div>
   </section>
@@ -195,9 +197,11 @@
     <h2>Default Stress Scenarios</h2>
     <p class="hint">These scenarios are active on every simulation run unless overridden at run time.</p>
     <div class="checkbox-grid">
+      {% set active_scenarios = store.default_scenarios | default([]) %}
       {% for key in scenario_keys %}
       <label class="checkbox-label">
-        <input type="checkbox" name="default_scenarios" value="{{ key }}" />
+        <input type="checkbox" name="default_scenarios" value="{{ key }}"
+               {% if key in active_scenarios %}checked{% endif %} />
         {{ key | replace('_', ' ') | title }}
       </label>
       {% endfor %}
@@ -210,98 +214,64 @@
     <div class="form-row-group">
       <div class="form-row">
         <label for="daily_leads">Daily Leads</label>
-        <input id="daily_leads" name="daily_leads" type="number" value="20" min="1" />
+        <input id="daily_leads" name="daily_leads" type="number"
+               value="{{ store.daily_leads }}" min="1" />
       </div>
       <div class="form-row">
         <label for="batch_days">Batch Days</label>
-        <input id="batch_days" name="batch_days" type="number" value="1" min="1" />
+        <input id="batch_days" name="batch_days" type="number"
+               value="{{ store.batch_days }}" min="1" />
       </div>
       <div class="form-row">
         <label for="every_seconds">Loop Interval (s)</label>
-        <input id="every_seconds" name="every_seconds" type="number" value="10" min="1" />
+        <input id="every_seconds" name="every_seconds" type="number"
+               value="{{ store.every_seconds }}" min="1" />
       </div>
       <div class="form-row">
         <label for="seed">Seed</label>
-        <input id="seed" name="seed" type="number" value="42" />
+        <input id="seed" name="seed" type="number" value="{{ store.seed }}" />
       </div>
     </div>
     <div class="form-row">
       <label for="delivery">Delivery Mode</label>
       <select id="delivery" name="delivery">
-        <option value="file">File only</option>
-        <option value="api">API only</option>
-        <option value="both">File + API</option>
+        <option value="file" {% if store.delivery == 'file' %}selected{% endif %}>File only</option>
+        <option value="api" {% if store.delivery == 'api' %}selected{% endif %}>API only</option>
+        <option value="both" {% if store.delivery == 'both' %}selected{% endif %}>File + API</option>
       </select>
     </div>
   </section>
 
   <div class="form-actions">
-    <a class="btn btn--ghost" href="{{ url_for('stores.index') }}">Cancel</a>
-    <button class="btn btn--primary" type="submit">Create Store</button>
+    <a class="btn btn--ghost" href="{{ url_for('stores.store_detail', store_id=store.dealership_id) }}">Cancel</a>
+    <button class="btn btn--primary" type="submit">Save Changes</button>
   </div>
 
 </form>
 
 <script>
-const TEMPLATES = {
-  {% for key, tpl in store_templates.items() %}
-  "{{ key }}": {{ tpl | tojson }},
-  {% endfor %}
-};
-
-function applyTemplate(key) {
-  const t = TEMPLATES[key];
-  if (!t) return;
-  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
-  set('salespeople', t.salespeople);
-  set('managers', t.managers);
-  set('bdc_agents', t.bdc_agents);
-  set('daily_leads', t.daily_leads);
-  set('month_shape', t.month_shape);
-  if (t.archetype_dist) {
-    const nh = t.archetype_dist.new_hire ?? 0;
-    set('arch_rockstar', t.archetype_dist.rockstar ?? 0);
-    set('arch_solid_mid', t.archetype_dist.solid_mid ?? 0);
-    set('arch_underperformer', t.archetype_dist.underperformer ?? 0);
-    set('arch_new_hire', nh);
-    renderHireDates(nh);
-  }
-  // Update close rate display
-  const crInput = document.querySelector('input[name="close_rate_pct"]');
-  if (crInput && t.close_rate_pct) {
-    crInput.value = t.close_rate_pct;
-    document.getElementById('close_rate_display').textContent = t.close_rate_pct + '%';
-  }
-}
+// Existing hire dates passed from server (list of ISO strings or null)
+const EXISTING_HIRE_DATES = {{ (store.new_hire_dates | default([])) | tojson }};
 
 function renderHireDates(count) {
   const container = document.getElementById('hire-date-container');
-  const safeCount = Math.min(count, 50); // cap at 50 new hires
-  if (safeCount <= 0) {
+  if (count <= 0) {
     container.innerHTML = '';
     return;
   }
-  // Preserve any values already entered
-  const existing = [];
-  for (let n = 1; n <= 50; n++) {
-    const el = document.getElementById(`new_hire_date_${n}`);
-    if (!el) break;
-    existing.push(el.value);
-  }
-
   let html = '<div style="margin-top:16px"><p class="hint">Set hire dates for each New Hire to enable the 6-month performance ramp curve. Leave blank to treat as fully ramped.</p><div class="form-row-group">';
-  for (let n = 1; n <= safeCount; n++) {
-    const val = existing[n - 1] || '';
+  for (let n = 1; n <= count; n++) {
+    const existingVal = (EXISTING_HIRE_DATES[n - 1] || '');
     html += `<div class="form-row">
       <label for="new_hire_date_${n}">🆕 New Hire ${n} — Hire Date</label>
-      <input id="new_hire_date_${n}" name="new_hire_date_${n}" type="date" value="${val}" />
+      <input id="new_hire_date_${n}" name="new_hire_date_${n}" type="date" value="${existingVal}" />
     </div>`;
   }
   html += '</div></div>';
   container.innerHTML = html;
 }
 
-// Render on load for default new_hire count of 1
+// Render immediately on page load with current new_hire count
 renderHireDates(parseInt(document.getElementById('arch_new_hire').value) || 0);
 </script>
 {% endblock %}

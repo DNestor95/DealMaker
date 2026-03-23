@@ -5,6 +5,19 @@
   <h1>API Settings</h1>
 </div>
 
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="alert alert--{{ category }}">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
+{% set service_key_field = fields | selectattr('key', 'equalto', 'SUPABASE_SERVICE_ROLE_KEY') | first %}
+{% if service_key_field and not service_key_field.configured %}
+<div class="alert alert--warning">
+  ⚠ <strong>SUPABASE_SERVICE_ROLE_KEY</strong> is not set. Rep user provisioning (Phase 4) will be unavailable until this is configured.
+</div>
+{% endif %}
+
 <form method="POST" action="{{ url_for('settings.save_settings') }}" class="form-card">
   <section class="form-section">
     <h2>TopRep Connection</h2>
@@ -12,7 +25,7 @@
     <div class="form-row">
       <label for="{{ field.key }}">
         {{ field.label }}
-        {% if field.configured %}<span class="badge badge--running">Configured</span>{% endif %}
+        {% if field.configured %}<span class="badge badge--running">Configured</span>{% else %}<span class="badge badge--stopped">Not set</span>{% endif %}
       </label>
       <input id="{{ field.key }}" name="{{ field.key }}"
              type="{% if field.secret %}password{% else %}text{% endif %}"

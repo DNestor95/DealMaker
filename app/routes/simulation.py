@@ -15,7 +15,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
-from app.routes.stores import _stores
+from app.routes.stores import _stores, _parse_hire_dates
 from app.supabase_client import post_event
 
 # Import core generation helpers from v1 generator (still valid in v2)
@@ -49,6 +49,8 @@ class _StoreThread(threading.Thread):
             salespeople=s["salespeople"],
             managers=s["managers"],
             bdc_agents=s["bdc_agents"],
+            archetype_dist=s.get("archetype_dist"),
+            new_hire_dates=_parse_hire_dates(s),
         )
         batch = 0
 
@@ -64,7 +66,15 @@ class _StoreThread(threading.Thread):
                 team=team,
                 dealership_id=s["dealership_id"],
                 seed=s["seed"] + batch,
-                # Pass custom ranges + weights through kwargs once generator is extended
+                base_close_rate=s.get("close_rate_pct", 36) / 100.0,
+                deal_amount_min=s.get("deal_amount_min", 12000),
+                deal_amount_max=s.get("deal_amount_max", 68000),
+                gross_profit_min=s.get("gross_profit_min", 700),
+                gross_profit_max=s.get("gross_profit_max", 6000),
+                activities_min=s.get("activities_per_deal_min", 2),
+                activities_max=s.get("activities_per_deal_max", 6),
+                month_shape=s.get("month_shape", "flat"),
+                scenarios=s.get("default_scenarios", []),
             )
 
             if s["delivery"] in {"file", "both"}:
