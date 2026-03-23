@@ -36,6 +36,7 @@
         <button class="btn btn--sm btn--danger"
                 onclick="simAction('{{ s.dealership_id }}', 'stop')">Stop</button>
         {% endif %}
+        <a class="btn btn--sm btn--ghost" href="{{ url_for('stores.edit_store', store_id=s.dealership_id) }}">✏ Edit</a>
       </td>
     </tr>
     {% endfor %}
