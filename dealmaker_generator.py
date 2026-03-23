@@ -323,6 +323,7 @@ def build_team(
     managers: int,
     bdc_agents: int,
     archetype_dist: dict[str, int] | None = None,
+    new_hire_dates: list[date | None] | None = None,
 ) -> list[TeamMember]:
     """Build a team roster.
 
@@ -331,6 +332,10 @@ def build_team(
     rockstar → solid_mid → underperformer → new_hire order).  Any
     remainder receive "solid_mid".  Managers and BDC agents always receive
     "solid_mid" (they don't have a meaningful close-rate archetype).
+
+    ``new_hire_dates`` is a list of ``date | None`` values, one per New Hire
+    rep (0-indexed).  When supplied, each New Hire TeamMember gets the
+    corresponding hire_date so the ramp curve is computed at simulation time.
     """
     team: list[TeamMember] = []
 
@@ -340,9 +345,14 @@ def build_team(
         for arch_key in ["rockstar", "solid_mid", "underperformer", "new_hire"]:
             archetype_slots.extend([arch_key] * archetype_dist.get(arch_key, 0))
 
+    new_hire_idx = 0
     for i in range(1, salespeople + 1):
         arch = archetype_slots[i - 1] if i - 1 < len(archetype_slots) else "solid_mid"
-        team.append(TeamMember(member_id=f"S-{i:03d}", role="sales", name=f"Sales Rep {i}", archetype=arch))
+        hire_dt: date | None = None
+        if arch == "new_hire" and new_hire_dates:
+            hire_dt = new_hire_dates[new_hire_idx] if new_hire_idx < len(new_hire_dates) else None
+            new_hire_idx += 1
+        team.append(TeamMember(member_id=f"S-{i:03d}", role="sales", name=f"Sales Rep {i}", archetype=arch, hire_date=hire_dt))
     for i in range(1, managers + 1):
         team.append(TeamMember(member_id=f"M-{i:03d}", role="manager", name=f"Manager {i}", archetype="solid_mid"))
     for i in range(1, bdc_agents + 1):

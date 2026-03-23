@@ -28,10 +28,13 @@
       Last error: <span id="last-error" class="error-text">—</span>
     </p>
     <div style="margin-top:12px">
-      <form method="POST" action="{{ url_for('stores.delete_store', store_id=store.dealership_id) }}"
-            onsubmit="return confirm('Delete store {{ store.dealership_id }}?')">
-        <button class="btn btn--sm btn--danger" type="submit">🗑 Delete Store</button>
-      </form>
+      <div class="btn-row">
+        <a class="btn btn--sm btn--ghost" href="{{ url_for('stores.edit_store', store_id=store.dealership_id) }}">✏ Edit Store</a>
+        <form method="POST" action="{{ url_for('stores.delete_store', store_id=store.dealership_id) }}"
+              onsubmit="return confirm('Delete store {{ store.dealership_id }}?')" style="display:inline">
+          <button class="btn btn--sm btn--danger" type="submit">🗑 Delete Store</button>
+        </form>
+      </div>
     </div>
   </section>
 
@@ -64,8 +67,9 @@
   <section class="card">
     <h2>Rep Archetypes</h2>
     {% set dist = store.archetype_dist | default({}) %}
+    {% set hire_dates = store.new_hire_dates | default([]) %}
     <table class="table">
-      <thead><tr><th>Archetype</th><th>Count</th><th>Close Rate Mult</th><th>Pipeline Advance</th></tr></thead>
+      <thead><tr><th>Archetype</th><th>Count</th><th>Close Rate Mult</th><th>Pipeline Advance</th><th>Notes</th></tr></thead>
       <tbody>
         {% for key, cfg in archetypes.items() %}
         <tr>
@@ -73,6 +77,16 @@
           <td>{{ dist.get(key, 0) }}</td>
           <td>{{ cfg.close_rate_mult }}×</td>
           <td>{{ (cfg.pipeline_advance_rate * 100) | round(0) | int }}%</td>
+          <td>
+            {% if key == 'new_hire' and dist.get('new_hire', 0) > 0 %}
+              {% set nh_count = dist.get('new_hire', 0) %}
+              <span class="hint" style="margin:0">
+                {% for n in range(nh_count) %}
+                  NH{{ n+1 }}: {% if hire_dates[n] is defined and hire_dates[n] %}{{ hire_dates[n] }}{% else %}<em>no date set</em>{% endif %}{% if not loop.last %},&nbsp;{% endif %}
+                {% endfor %}
+              </span>
+            {% else %}—{% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -221,7 +235,7 @@
               <button class="btn btn--xs btn--ghost" onclick="togglePwd(this)">👁</button>
             </td>
             {% if toprep_url_configured %}
-            <td><a href="{{ toprep_app_url }}/login?email={{ cred.email | urlencode }}" target="_blank" class="link">Open ↗</a></td>
+            <td><a href="{{ toprep_app_url }}/login?email={{ cred.email | urlencode }}" target="_blank" rel="noopener noreferrer" class="link">Open ↗</a></td>
             {% endif %}
             <td>
               {% if cred.error is defined and cred.error %}

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
-from app.routes.stores import _stores
+from app.routes.stores import _stores, _parse_hire_dates
 from app.supabase_client import post_event
 
 # Import core generation helpers from v1 generator (still valid in v2)
@@ -50,6 +50,7 @@ class _StoreThread(threading.Thread):
             managers=s["managers"],
             bdc_agents=s["bdc_agents"],
             archetype_dist=s.get("archetype_dist"),
+            new_hire_dates=_parse_hire_dates(s),
         )
         batch = 0
 
