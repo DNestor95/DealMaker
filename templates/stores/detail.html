@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}— {{ store.dealership_id }}{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>{{ store.dealership_id }}</h1>
+  <span class="badge badge--{{ store.status }}" id="store-status">{{ store.status }}</span>
+</div>
+
+<div class="detail-grid">
+
+  <!-- ── Controls ─── -->
+  <section class="card">
+    <h2>Controls</h2>
+    <div class="btn-row">
+      <button class="btn btn--success" id="btn-start"
+              onclick="simAction('{{ store.dealership_id }}', 'start')"
+              {% if store.status == 'running' %}disabled{% endif %}>
+        ▶ Start
+      </button>
+      <button class="btn btn--danger" id="btn-stop"
+              onclick="simAction('{{ store.dealership_id }}', 'stop')"
+              {% if store.status == 'stopped' %}disabled{% endif %}>
+        ■ Stop
+      </button>
+    </div>
+    <p class="meta">
+      Events sent: <strong id="events-count">{{ store.events_sent }}</strong><br/>
+      Last error: <span id="last-error" class="error-text">—</span>
+    </p>
+  </section>
+
+  <!-- ── Configuration summary ─── -->
+  <section class="card">
+    <h2>Configuration</h2>
+    <table class="kv-table">
+      <tr><td>Delivery</td><td>{{ store.delivery }}</td></tr>
+      <tr><td>Leads / Day</td><td>{{ store.daily_leads }}</td></tr>
+      <tr><td>Batch Days</td><td>{{ store.batch_days }}</td></tr>
+      <tr><td>Loop Interval</td><td>{{ store.every_seconds }}s</td></tr>
+      <tr><td>Close Rate</td><td>{{ store.close_rate_pct }}%</td></tr>
+      <tr><td>Status Advance</td><td>{{ store.status_advance_pct }}%</td></tr>
+      <tr><td>Activities / Deal</td><td>{{ store.activities_per_deal_min }}–{{ store.activities_per_deal_max }}</td></tr>
+    </table>
+  </section>
+
+  <!-- ── Team ─── -->
+  <section class="card">
+    <h2>Team</h2>
+    <table class="kv-table">
+      <tr><td>Sales Reps</td><td>{{ store.salespeople }}</td></tr>
+      <tr><td>Managers</td><td>{{ store.managers }}</td></tr>
+      <tr><td>BDC Agents</td><td>{{ store.bdc_agents }}</td></tr>
+    </table>
+  </section>
+
+  <!-- ── Lead Sources ─── -->
+  <section class="card">
+    <h2>Lead Sources</h2>
+    <ul class="tag-list">
+      {% for src in store.lead_sources %}
+      <li class="tag">{{ src | replace('_',' ') | title }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <!-- ── Pipeline ─── -->
+  <section class="card">
+    <h2>Pipeline Stages</h2>
+    <ul class="tag-list">
+      {% for st in store.deal_statuses %}
+      <li class="tag">{{ st | replace('_',' ') | title }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <!-- ── Activity Types ─── -->
+  <section class="card">
+    <h2>Activity Types</h2>
+    <ul class="tag-list">
+      {% for at in store.activity_types %}
+      <li class="tag">{{ at | title }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <!-- ── Live Rep Profiles ─── -->
+  <section class="card card--wide">
+    <h2>Live Rep Profiles (from TopRep DB)</h2>
+    {% if profiles %}
+    <table class="table">
+      <thead>
+        <tr><th>ID</th><th>Name</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        {% for p in profiles %}
+        <tr>
+          <td><code>{{ p.id }}</code></td>
+          <td>{{ p.first_name }} {{ p.last_name }}</td>
+          <td>{{ p.role }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="hint">No rep profiles found for this store in TopRep (or API not connected).</p>
+    {% endif %}
+  </section>
+
+</div>
+
+<script>
+// Poll status every 3s while page is open
+setInterval(() => {
+  fetch('/simulation/{{ store.dealership_id }}/status')
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('store-status').textContent = d.status;
+      document.getElementById('store-status').className = 'badge badge--' + d.status;
+      document.getElementById('events-count').textContent = d.events_sent;
+      document.getElementById('last-error').textContent = d.last_error || '—';
+      document.getElementById('btn-start').disabled = d.status === 'running';
+      document.getElementById('btn-stop').disabled  = d.status === 'stopped';
+    })
+    .catch(() => {});
+}, 3000);
+</script>
+{% endblock %}

@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}— New Store{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Create New Store</h1>
+</div>
+
+{% if error %}
+<div class="alert alert--error">{{ error }}</div>
+{% endif %}
+
+<form method="POST" action="{{ url_for('stores.create_store') }}" class="form-card">
+
+  <!-- ── Identity ─────────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Identity</h2>
+    <div class="form-row">
+      <label for="dealership_id">Dealership ID <span class="req">*</span></label>
+      <input id="dealership_id" name="dealership_id" type="text"
+             placeholder="DLR-001" required />
+    </div>
+  </section>
+
+  <!-- ── Team Composition ──────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Team Composition</h2>
+    <div class="form-row-group">
+      <div class="form-row">
+        <label for="salespeople">Sales Reps</label>
+        <input id="salespeople" name="salespeople" type="number" value="8" min="1" />
+      </div>
+      <div class="form-row">
+        <label for="managers">Managers</label>
+        <input id="managers" name="managers" type="number" value="2" min="1" />
+      </div>
+      <div class="form-row">
+        <label for="bdc_agents">BDC Agents</label>
+        <input id="bdc_agents" name="bdc_agents" type="number" value="3" min="0" />
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Lead Sources ──────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Lead Sources</h2>
+    <p class="hint">Select which sources this dealership receives leads from.</p>
+    <div class="checkbox-grid">
+      {% for src in lead_sources %}
+      <label class="checkbox-label">
+        <input type="checkbox" name="lead_sources" value="{{ src }}"
+               {% if src in ['internet','phone','showroom'] %}checked{% endif %} />
+        {{ src | replace('_', ' ') | title }}
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+
+  <!-- ── Deal Pipeline ─────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Deal Pipeline Stages</h2>
+    <p class="hint">Select which statuses are active in this store's pipeline.</p>
+    <div class="checkbox-grid">
+      {% for status in deal_statuses %}
+      <label class="checkbox-label">
+        <input type="checkbox" name="deal_statuses" value="{{ status }}" checked />
+        {{ status | replace('_', ' ') | title }}
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+
+  <!-- ── Activity Types ────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Activity Types</h2>
+    <p class="hint">Which activity types are tracked at this store?</p>
+    <div class="checkbox-grid">
+      {% for atype in activity_types %}
+      <label class="checkbox-label">
+        <input type="checkbox" name="activity_types" value="{{ atype }}" checked />
+        {{ atype | title }}
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+
+  <!-- ── Deal Financials ───────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Deal Financial Ranges</h2>
+    <div class="form-row-group">
+      <div class="form-row">
+        <label for="deal_amount_min">Deal Amount Min ($)</label>
+        <input id="deal_amount_min" name="deal_amount_min" type="number" value="12000" min="1000" />
+      </div>
+      <div class="form-row">
+        <label for="deal_amount_max">Deal Amount Max ($)</label>
+        <input id="deal_amount_max" name="deal_amount_max" type="number" value="68000" min="1000" />
+      </div>
+      <div class="form-row">
+        <label for="gross_profit_min">Gross Profit Min ($)</label>
+        <input id="gross_profit_min" name="gross_profit_min" type="number" value="700" min="0" />
+      </div>
+      <div class="form-row">
+        <label for="gross_profit_max">Gross Profit Max ($)</label>
+        <input id="gross_profit_max" name="gross_profit_max" type="number" value="6000" min="0" />
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Rep Behaviour ─────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Rep Behaviour Weights</h2>
+    <p class="hint">These control the simulation's statistical tendencies for this store.</p>
+    <div class="slider-grid">
+      <div class="slider-row">
+        <label>Close Rate <span class="pct-label" id="close_rate_display">36%</span></label>
+        <input type="range" name="close_rate_pct" min="5" max="80" value="36"
+               oninput="document.getElementById('close_rate_display').textContent=this.value+'%'" />
+      </div>
+      <div class="slider-row">
+        <label>Status Advance Rate <span class="pct-label" id="advance_display">88%</span></label>
+        <input type="range" name="status_advance_pct" min="20" max="100" value="88"
+               oninput="document.getElementById('advance_display').textContent=this.value+'%'" />
+      </div>
+      <div class="form-row-group">
+        <div class="form-row">
+          <label for="activities_per_deal_min">Activities / Deal (min)</label>
+          <input id="activities_per_deal_min" name="activities_per_deal_min" type="number" value="2" min="1" />
+        </div>
+        <div class="form-row">
+          <label for="activities_per_deal_max">Activities / Deal (max)</label>
+          <input id="activities_per_deal_max" name="activities_per_deal_max" type="number" value="6" min="1" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Runner Config ─────────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>Runner Configuration</h2>
+    <div class="form-row-group">
+      <div class="form-row">
+        <label for="daily_leads">Daily Leads</label>
+        <input id="daily_leads" name="daily_leads" type="number" value="20" min="1" />
+      </div>
+      <div class="form-row">
+        <label for="batch_days">Batch Days</label>
+        <input id="batch_days" name="batch_days" type="number" value="1" min="1" />
+      </div>
+      <div class="form-row">
+        <label for="every_seconds">Loop Interval (s)</label>
+        <input id="every_seconds" name="every_seconds" type="number" value="10" min="1" />
+      </div>
+      <div class="form-row">
+        <label for="seed">Seed</label>
+        <input id="seed" name="seed" type="number" value="42" />
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="delivery">Delivery Mode</label>
+      <select id="delivery" name="delivery">
+        <option value="file">File only</option>
+        <option value="api">API only</option>
+        <option value="both">File + API</option>
+      </select>
+    </div>
+  </section>
+
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="{{ url_for('stores.index') }}">Cancel</a>
+    <button class="btn btn--primary" type="submit">Create Store</button>
+  </div>
+
+</form>
+{% endblock %}

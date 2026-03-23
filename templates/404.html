@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}— 404{% endblock %}
+{% block content %}
+<div class="empty-state">
+  <h1>404</h1>
+  <p>That store or page doesn't exist.</p>
+  <a class="btn btn--primary" href="{{ url_for('stores.index') }}">Back to Stores</a>
+</div>
+{% endblock %}

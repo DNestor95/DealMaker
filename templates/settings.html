@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}— Settings{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>API Settings</h1>
+</div>
+
+<form method="POST" action="{{ url_for('settings.save_settings') }}" class="form-card">
+  <section class="form-section">
+    <h2>TopRep Connection</h2>
+    {% for field in fields %}
+    <div class="form-row">
+      <label for="{{ field.key }}">
+        {{ field.label }}
+        {% if field.configured %}<span class="badge badge--running">Configured</span>{% endif %}
+      </label>
+      <input id="{{ field.key }}" name="{{ field.key }}"
+             type="{% if field.secret %}password{% else %}text{% endif %}"
+             placeholder="{{ field.display }}" autocomplete="off" />
+      <p class="hint">Leave blank to keep the current value.</p>
+    </div>
+    {% endfor %}
+  </section>
+  <div class="form-actions">
+    <button class="btn btn--primary" type="submit">Save Settings</button>
+  </div>
+</form>
+{% endblock %}

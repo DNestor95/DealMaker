@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DealMaker v2 {% block title %}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+</head>
+<body>
+  <nav class="navbar">
+    <a class="brand" href="{{ url_for('stores.index') }}">DealMaker <span>v2</span></a>
+    <ul>
+      <li><a href="{{ url_for('stores.index') }}">Stores</a></li>
+      <li><a href="{{ url_for('stores.new_store') }}">+ New Store</a></li>
+      <li><a href="{{ url_for('settings.settings') }}">Settings</a></li>
+    </ul>
+  </nav>
+
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="alert alert--{{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
