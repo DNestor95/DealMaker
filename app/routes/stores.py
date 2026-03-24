@@ -496,6 +496,11 @@ def backfill_store(store_id: str):
         api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", ""))
         auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
         supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "")
+        if not auth_token.strip():
+            return jsonify({
+                "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
+                "hint": "Set TOPREP_AUTH_TOKEN in Settings before running an API-delivery backfill.",
+            }), 401
         if api_url:
             result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
             errors_count = result["failed"]
