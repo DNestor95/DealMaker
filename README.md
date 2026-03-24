@@ -10,7 +10,76 @@ Generates synthetic dealership CRM traffic so you can test `totrep` with realist
 - `activity.completed`
 - `rep_quota_updated`
 
-All output now follows the TOP REP canonical event envelope from `REALTIME_DATA_INGEST_REFERENCE.md`.
+All output follows the TOP REP canonical event envelope from `REALTIME_DATA_INGEST_REFERENCE.md`.
+
+## API-first smoke test
+
+### Step 1 — generate a tiny reproducible dataset
+
+```bash
+python dealmaker_generator.py \
+  --days 1 --daily-leads 3 --seed 42 \
+  --delivery file \
+  --output output/events_smoke.jsonl
+```
+
+### Step 2 — validate the file against the TopRep contract
+
+```bash
+python dealmaker_generator.py \
+  --days 1 --daily-leads 3 --seed 42 \
+  --delivery file \
+  --output output/events_smoke.jsonl \
+  --validate
+```
+
+The `--validate` flag appends a `schema_validation` key to the JSON summary. When all events pass, `"passed": true` is printed and the process exits 0. Any violations print to the same JSON block and the process exits 1.
+
+### Step 3 — post directly to the TopRep API
+
+```bash
+python dealmaker_generator.py \
+  --days 1 --daily-leads 3 --seed 42 \
+  --delivery api \
+  --api-url https://<your-domain>/api/events \
+  --auth-token <your-jwt>
+```
+
+Add `--validate` to also run the local schema check before posting:
+
+```bash
+python dealmaker_generator.py \
+  --days 1 --daily-leads 3 --seed 42 \
+  --delivery api \
+  --api-url https://<your-domain>/api/events \
+  --auth-token <your-jwt> \
+  --validate
+```
+
+### Step 4 — run the automated contract tests
+
+```bash
+python -m pytest tests/test_schema_compliance.py -v
+```
+
+The test suite (56 tests) proves that:
+- All envelope keys (`sales_rep_id`, `type`, `payload`, `created_at`) are present and valid.
+- `created_at` is always UTC ISO-8601 with milliseconds and a `Z` suffix (e.g. `2026-03-03T15:04:05.000Z`).
+- Every event type is one of the five allowed types.
+- Required payload fields are present for every event type.
+- `activity_type` is always one of `call|email|meeting|demo|note`.
+- `outcome` is always one of the ten allowed outcome values.
+- Status fields use only `lead|qualified|proposal|negotiation|closed_won|closed_lost`.
+- `gross_profit` (optional per TopRep schema) is included by DealMaker.
+- `created_at` (optional per TopRep schema) is always sent for backfill fidelity.
+- All five event types are generated in a normal simulation run.
+
+## Verification plan
+
+1. **Local file check** — run Step 1 + Step 2 above; confirm `"passed": true`.
+2. **Unit tests** — run Step 4; confirm `56 passed`.
+3. **Live API post** — run Step 3 with real credentials; confirm `api_result.sent > 0` and `api_result.failed == 0`.
+4. **TopRep side** — verify new rows appear in the `events` table and `rep_month_stats` updates as expected (see §6 of `REALTIME_DATA_INGEST_REFERENCE.md`).
 
 ## Quick start
 
@@ -101,6 +170,7 @@ python dealmaker_generator.py --delivery both --output output/events_live.jsonl
 - `--auth-token` (required for `api`/`both`, or set `TOPREP_AUTH_TOKEN` env var)
 - `--format` (`jsonl` or `csv`, default: `jsonl`)
 - `--output` (default: `output/events.jsonl`)
+- `--validate` (flag; validate generated events against the TopRep API contract and print a compliance report)
 
 ## Event schema
 
