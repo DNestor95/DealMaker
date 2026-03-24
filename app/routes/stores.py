@@ -51,7 +51,28 @@ bp = Blueprint("stores", __name__)
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------
-_STORES_FILE = _APP_ROOT / "output" / "stores_config.json"
+
+
+def _resolve_output_dir() -> Path:
+    """Return a writable output directory.
+
+    Vercel (and other serverless runtimes) mount the deployment bundle on a
+    read-only filesystem.  ``/tmp`` is always writable, so we fall back to
+    ``/tmp/dealmaker_output`` when the preferred ``output/`` directory cannot
+    be created.
+    """
+    preferred = _APP_ROOT / "output"
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        return preferred
+    except OSError:
+        fallback = Path("/tmp") / "dealmaker_output"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+_OUTPUT_DIR = _resolve_output_dir()
+_STORES_FILE = _OUTPUT_DIR / "stores_config.json"
 
 
 def _load_stores() -> dict[str, dict]:
@@ -66,7 +87,6 @@ def _load_stores() -> dict[str, dict]:
 
 
 def _save_stores(stores: dict[str, dict]) -> None:
-    _STORES_FILE.parent.mkdir(parents=True, exist_ok=True)
     _STORES_FILE.write_text(json.dumps(stores, indent=2), encoding="utf-8")
 
 

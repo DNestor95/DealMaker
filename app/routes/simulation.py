@@ -18,7 +18,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, render_template
 
-from app.routes.stores import _stores, _parse_hire_dates
+from app.routes.stores import _OUTPUT_DIR, _stores, _parse_hire_dates
 
 # Absolute path to the project root so output/ is always found regardless of CWD.
 _APP_ROOT = Path(__file__).parent.parent.parent
@@ -103,7 +103,7 @@ class _StoreThread(threading.Thread):
         )
         batch = 0
 
-        output_dir = _APP_ROOT / "output" / "stores"
+        output_dir = _OUTPUT_DIR / "stores"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / f"{s['dealership_id']}.jsonl"
 
@@ -224,7 +224,7 @@ def status(store_id: str):
 
 def _build_report(store_id: str) -> dict | None:
     """Parse the store's JSONL output file and return aggregated stats."""
-    output_file = _APP_ROOT / "output" / "stores" / f"{store_id}.jsonl"
+    output_file = _OUTPUT_DIR / "stores" / f"{store_id}.jsonl"
     if not output_file.exists():
         return None
 
