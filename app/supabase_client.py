@@ -215,7 +215,7 @@ def priors_from_archetypes(store_id: str, sources: list[str], stages: list[str])
 # Rep user provisioning (Admin Auth API — requires service_role key)
 # ---------------------------------------------------------------------------
 
-_TEST_EMAIL_RE = re.compile(r"@[a-z0-9\-]+\.(test|example|localhost|invalid)$", re.IGNORECASE)
+_TEST_EMAIL_RE = re.compile(r"@(test\.com|[a-z0-9\-]+\.(test|example|localhost|invalid))$", re.IGNORECASE)
 
 
 def _is_safe_test_email(email: str) -> bool:
@@ -284,8 +284,8 @@ def provision_store_reps(store_config: dict) -> list[dict]:
         abbrev = {"rockstar": "rock", "solid_mid": "mid", "underperformer": "under", "new_hire": "new"}.get(arch, "rep")
         abbrev_counters[abbrev] = abbrev_counters.get(abbrev, 0) + 1
         n = abbrev_counters[abbrev]
-        email = f"sim-{store_slug}-{abbrev}{n}@dealmaker.test"
-        password = _generate_password()
+        email = f"sim-{store_slug}-{abbrev}{n}@test.com"
+        password = "test123"
 
         result = admin_create_user(email, password)
         if "error" in result:
