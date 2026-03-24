@@ -70,12 +70,15 @@ def _service_headers() -> dict[str, str]:
 
 def rest_get(path: str, params: dict | None = None) -> list[dict]:
     """Simple REST GET against the Supabase REST API."""
-    url = f"{_base_url()}/rest/v1/{path}"
+    base = _base_url()
+    if not base:
+        return []
+    url = f"{base}/rest/v1/{path}"
     if params:
         qs = "&".join(f"{k}={v}" for k, v in params.items())
         url = f"{url}?{qs}"
-    req = request.Request(url, headers=_headers(), method="GET")
     try:
+        req = request.Request(url, headers=_headers(), method="GET")
         with request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception:
@@ -84,10 +87,13 @@ def rest_get(path: str, params: dict | None = None) -> list[dict]:
 
 def rest_post(path: str, body: dict) -> dict:
     """Simple REST POST against the Supabase REST API."""
-    url = f"{_base_url()}/rest/v1/{path}"
+    base = _base_url()
+    if not base:
+        return {}
+    url = f"{base}/rest/v1/{path}"
     data = json.dumps(body).encode("utf-8")
-    req = request.Request(url, data=data, headers=_headers(), method="POST")
     try:
+        req = request.Request(url, data=data, headers=_headers(), method="POST")
         with request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
@@ -171,11 +177,14 @@ def seed_source_stage_priors(
         }
         for p in priors
     ]
-    url = f"{_base_url()}/rest/v1/source_stage_priors"
+    base = _base_url()
+    if not base:
+        return {"error": "TOPREP_API_URL not configured"}
+    url = f"{base}/rest/v1/source_stage_priors"
     data = json.dumps(rows).encode("utf-8")
     headers = {**_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"}
-    req = request.Request(url, data=data, headers=headers, method="POST")
     try:
+        req = request.Request(url, data=data, headers=headers, method="POST")
         with request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
             return {"ok": True, "rows": len(rows), "response": raw}
@@ -336,10 +345,13 @@ def provision_store_reps(store_config: dict) -> list[dict]:
 
 def rest_post_with_headers(path: str, body: dict, headers: dict) -> dict:
     """REST POST with custom headers (internal helper)."""
-    url = f"{_base_url()}/rest/v1/{path}"
+    base = _base_url()
+    if not base:
+        return {}
+    url = f"{base}/rest/v1/{path}"
     data = json.dumps(body).encode("utf-8")
-    req = request.Request(url, data=data, headers=headers, method="POST")
     try:
+        req = request.Request(url, data=data, headers=headers, method="POST")
         with request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
