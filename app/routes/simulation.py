@@ -8,6 +8,7 @@ GET  /simulation/<store_id>/status  → JSON status snapshot
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -16,12 +17,11 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from app.routes.stores import _stores, _parse_hire_dates
-from app.supabase_client import post_event
 
 # Import core generation helpers from v1 generator (still valid in v2)
-import sys, os
+import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from dealmaker_generator import build_team, generate_events
+from dealmaker_generator import build_team, generate_events, normalize_delivery_url, send_events_to_api
 
 bp = Blueprint("simulation", __name__, url_prefix="/simulation")
 
@@ -83,12 +83,17 @@ class _StoreThread(threading.Thread):
                         fh.write(json.dumps(ev.to_dict(), separators=(",", ":")) + "\n")
 
             if s["delivery"] in {"api", "both"}:
-                for ev in events:
-                    result = post_event(ev.to_dict())
-                    if "error" in result:
-                        self.last_error = str(result["error"])[:140]
+                api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", ""))
+                auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
+                supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "")
+                if api_url:
+                    result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
+                    if result["failed"] > 0 and result["errors"]:
+                        self.last_error = str(result["errors"][0])[:140]
                     else:
                         self.last_error = None
+                else:
+                    self.last_error = "TOPREP_API_URL not configured"
 
             self.events_sent += len(events)
             self.last_batch_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

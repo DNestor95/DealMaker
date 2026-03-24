@@ -301,7 +301,7 @@ def backfill_store(store_id: str):
     import sys
     from pathlib import Path as _Path
     sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
-    from dealmaker_generator import build_team, generate_events
+    from dealmaker_generator import build_team, generate_events, normalize_delivery_url, send_events_to_api
 
     team = build_team(
         salespeople=store["salespeople"],
@@ -342,11 +342,14 @@ def backfill_store(store_id: str):
 
     errors_count = 0
     if delivery in {"api", "both"}:
-        from app.supabase_client import post_event
-        for ev in events:
-            result = post_event(ev.to_dict())
-            if "error" in result:
-                errors_count += 1
+        api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", ""))
+        auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
+        supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "")
+        if api_url:
+            result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
+            errors_count = result["failed"]
+        else:
+            errors_count = len(events)
 
     return jsonify({
         "events": len(events),

@@ -98,12 +98,38 @@ def rest_post(path: str, body: dict) -> dict:
 
 
 def post_event(event: dict) -> dict:
-    """Post a single event to the TopRep /api/events endpoint."""
-    api_url = os.getenv("TOPREP_API_URL", "")
+    """Post a single event to the TopRep /api/events endpoint.
+
+    Uses the configured TOPREP_API_URL directly. For edge function URLs
+    (``/functions/v1/``), this posts to the function URL as-is.  For all
+    other Supabase URLs the event is routed to ``{supabase_root}/api/events``.
+
+    Note: bulk delivery (simulation loop, backfill) should use
+    ``dealmaker_generator.send_events_to_api`` which handles edge-function
+    batch payloads correctly.
+    """
+    from urllib.parse import urlparse
+
+    api_url = os.getenv("TOPREP_API_URL", "").rstrip("/")
     if not api_url:
         return {"error": "TOPREP_API_URL not configured"}
-    base = api_url.rstrip("/").split("/functions/")[0].split("/rest/")[0]
-    url = f"{base}/api/events"
+
+    parsed = urlparse(api_url)
+    path = parsed.path
+
+    # Use the URL as-is when it already targets a specific endpoint path.
+    # Route bare Supabase project URLs to /api/events.
+    if (
+        path.startswith("/functions/v1/")
+        or path.startswith("/api/events")
+        or path.startswith("/rest/v1/")
+    ):
+        url = api_url
+    else:
+        # Bare Supabase project URL — append /api/events
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        url = f"{base}/api/events"
+
     data = json.dumps(event).encode("utf-8")
     req = request.Request(url, data=data, headers=_headers(), method="POST")
     try:
