@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 
 bp = Blueprint("settings", __name__, url_prefix="/settings")
 
@@ -75,3 +75,12 @@ def save_settings():
         flash(f"Settings applied for this session but could not be persisted: {exc}", "warning")
 
     return redirect(url_for("settings.settings"))
+
+
+@bp.route("/test-connection", methods=["POST"])
+def test_connection():
+    """Test the live Supabase REST API connection and return JSON."""
+    from app.supabase_client import check_connection  # local import avoids circular dep
+
+    result = check_connection()
+    return jsonify(result)

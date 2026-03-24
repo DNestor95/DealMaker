@@ -68,6 +68,41 @@ def _service_headers() -> dict[str, str]:
     return h
 
 
+def check_connection() -> dict:
+    """Verify that the Supabase REST API is reachable with the configured credentials.
+
+    Returns ``{"ok": True, "message": "..."}`` on success or
+    ``{"ok": False, "error": "..."}`` on failure.
+    """
+    base = _base_url()
+    if not base:
+        return {"ok": False, "error": "TOPREP_API_URL is not configured."}
+
+    apikey = os.getenv("SUPABASE_ANON_KEY", "")
+    token = os.getenv("TOPREP_AUTH_TOKEN", "")
+    if not apikey and not token:
+        return {
+            "ok": False,
+            "error": "No credentials configured — set SUPABASE_ANON_KEY and/or TOPREP_AUTH_TOKEN.",
+        }
+
+    url = f"{base}/rest/v1/"
+    try:
+        req = request.Request(url, headers=_headers(), method="GET")
+        with request.urlopen(req, timeout=10) as resp:
+            return {"ok": True, "message": f"Connected to Supabase (HTTP {resp.status})."}
+    except error.HTTPError as exc:
+        if exc.code == 401:
+            return {
+                "ok": False,
+                "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN and SUPABASE_ANON_KEY.",
+            }
+        body = exc.read().decode("utf-8", errors="replace")[:300]
+        return {"ok": False, "error": f"HTTP {exc.code}: {body}"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def rest_get(path: str, params: dict | None = None) -> list[dict]:
     """Simple REST GET against the Supabase REST API."""
     base = _base_url()

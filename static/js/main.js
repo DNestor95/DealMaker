@@ -22,3 +22,30 @@ async function simAction(storeId, action) {
     console.error('simAction error:', err);
   }
 }
+
+async function testSupabaseConnection() {
+  const btn = document.getElementById('btn-test-conn');
+  const result = document.getElementById('conn-result');
+  btn.disabled = true;
+  btn.textContent = '⏳ Testing…';
+  result.style.display = 'none';
+
+  try {
+    const resp = await fetch('/settings/test-connection', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      result.className = 'alert alert--success';
+      result.textContent = '✓ ' + data.message;
+    } else {
+      result.className = 'alert alert--error';
+      result.textContent = '✗ ' + data.error;
+    }
+  } catch (err) {
+    result.className = 'alert alert--error';
+    result.textContent = '✗ Request failed: ' + err;
+  } finally {
+    result.style.display = '';
+    btn.disabled = false;
+    btn.textContent = '🔌 Test Connection';
+  }
+}

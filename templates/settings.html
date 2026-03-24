@@ -36,6 +36,11 @@
   </section>
   <div class="form-actions">
     <button class="btn btn--primary" type="submit">Save Settings</button>
+    <button class="btn btn--ghost" type="button" id="btn-test-conn" onclick="testSupabaseConnection()">
+      🔌 Test Connection
+    </button>
   </div>
 </form>
+
+<div id="conn-result" style="display:none;margin-top:12px"></div>
 {% endblock %}
