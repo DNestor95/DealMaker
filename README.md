@@ -2,6 +2,124 @@
 
 Generates synthetic dealership CRM traffic so you can test `totrep` with realistic event streams.
 
+## Getting started (new contributors)
+
+Follow these steps to go from a fresh clone to inserting your first row in Supabase.
+
+### Prerequisites
+
+- Python 3.11+
+- Access to the TopRep Supabase project (email + password for a user account)
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Create your `.env` file
+
+```bash
+cp .env.example .env
+```
+
+### 3. Obtain your auth token
+
+DealMaker authenticates to Supabase using your user JWT (`TOPREP_AUTH_TOKEN`).
+
+**Option A — Python helper (cross-platform, recommended):**
+
+```bash
+python scripts/fetch_jwt.py
+```
+
+The script prompts for your Supabase email and password, retrieves the JWT via
+the Supabase password grant, and writes `TOPREP_AUTH_TOKEN` directly to `.env`.
+Your password is never echoed and the full token is never printed.
+
+**Option B — PowerShell (Windows):**
+
+```powershell
+.\fetch_supabase_jwt.ps1
+```
+
+Requires `SUPABASE_ANON_KEY` to be set in `.env` first.
+
+**Option C — Manual (any HTTP client):**
+
+```http
+POST https://ahimfdfuuefesgbbnccr.supabase.co/auth/v1/token?grant_type=password
+apikey: sb_publishable_SABMCFFXgDOvyvTvJWH0_w_qREoAIpS
+Content-Type: application/json
+
+{"email":"you@example.com","password":"yourpassword"}
+```
+
+Copy the `access_token` from the response and paste it into `.env`:
+
+```dotenv
+TOPREP_AUTH_TOKEN=eyJ...
+```
+
+### 4. Verify connectivity
+
+```bash
+python scripts/check_connection.py
+```
+
+Expected output on success:
+
+```
+=== DealMaker connectivity check ===
+
+✓ TOPREP_AUTH_TOKEN is configured  (eyJhbGciOiJI…)
+  Target endpoint: https://ahimfdfuuefesgbbnccr.supabase.co
+
+✓ Connection OK — Connected to Supabase (HTTP 200).
+
+=== All checks passed ✓ ===
+```
+
+If you see a `401` error, re-run `python scripts/fetch_jwt.py` to refresh the
+token (JWTs expire after ~1 hour by default).
+
+### 5. Send a test event (optional but recommended)
+
+```bash
+python scripts/check_connection.py --send
+```
+
+This sends one `activity.completed` event and confirms end-to-end delivery:
+
+```
+✓ Test event delivered successfully  (status=200)
+```
+
+### 6. Run DealMaker
+
+Generate and send simulated data to Supabase in one command:
+
+```bash
+python dealmaker_generator.py \
+  --days 1 --daily-leads 5 --seed 42 \
+  --delivery api
+```
+
+Or use the Flask web UI:
+
+```bash
+python run.py
+# Open http://127.0.0.1:5000 → create a Store → click Backfill
+```
+
+### 7. Verify data in Supabase
+
+Open the [Supabase dashboard](https://supabase.com/dashboard) → your project →
+**Table Editor** → `events` table.  You should see new rows with the
+`sales_rep_id` and event types generated above.
+
+---
+
 ## What it simulates
 
 - `deal.created`
@@ -198,17 +316,28 @@ Each event includes:
 
 ## Database/API connection setup
 
-Preferred path is TOP REP API (recommended by your reference):
+> **New here?** See the [Getting started](#getting-started-new-contributors) section at the top
+> of this file — it walks you through obtaining a token, verifying connectivity, and sending
+> your first event step by step.
 
-1. Get a valid user JWT for TOP REP.
-2. Create a `.env` file in this project (you can copy `.env.example`):
-	- `TOPREP_API_URL=https://<your-domain>/api/events`
-	- `TOPREP_AUTH_TOKEN=<your-jwt>`
-3. Use `--delivery api` or `--delivery both` with `--api-url https://<your-domain>/api/events`.
-4. In GUI Add Store dialog, set:
-	- `Delivery` = `api` or `both`
-	- `API URL` = TOP REP `/api/events` (auto-filled from `.env`)
-	- `Auth Token` = JWT (auto-filled from `.env`)
+### Helper scripts
+
+| Script | Purpose |
+|---|---|
+| `python scripts/fetch_jwt.py` | Fetch a Supabase user JWT and write it to `.env` |
+| `python scripts/check_connection.py` | Validate connectivity (exits 0 on success) |
+| `python scripts/check_connection.py --send` | Connectivity check + send one test event |
+| `.\fetch_supabase_jwt.ps1` | PowerShell equivalent of `fetch_jwt.py` (Windows) |
+
+### Preferred path — TOP REP API
+
+1. Get a valid user JWT (run `python scripts/fetch_jwt.py`).
+2. Copy `.env.example` to `.env` — `TOPREP_AUTH_TOKEN` is written automatically.
+3. Use `--delivery api` or `--delivery both` with the generator:
+   ```bash
+   python dealmaker_generator.py --delivery api
+   ```
+4. In the GUI Add Store dialog, set **Delivery** = `api` or `both` (auto-filled from `.env`).
 
 Notes:
 
@@ -258,3 +387,14 @@ Required `.env` values for this mode:
 - `TOPREP_API_URL=https://<project-ref>.functions.supabase.co/<function-name>`
 - `TOPREP_AUTH_TOKEN=<user-jwt>`
 - `SUPABASE_ANON_KEY=<sb_publishable_...>`
+
+### Environment variables reference
+
+| Variable | Required | Notes |
+|---|---|---|
+| `TOPREP_AUTH_TOKEN` | **Yes** | Supabase user JWT.  Obtain with `python scripts/fetch_jwt.py`. |
+| `TOPREP_API_URL` | No | Target endpoint.  Defaults to the TopRep Supabase project. |
+| `SUPABASE_ANON_KEY` | No | Publishable key.  Only needed when targeting a custom Supabase project. |
+| `SUPABASE_SERVICE_ROLE_KEY` | No — **server-only** | Admin key for user provisioning.  Never commit; never expose to the browser. |
+| `TOPREP_APP_URL` | No | TopRep web-app URL used for QA login links. |
+| `FLASK_SECRET_KEY` | No | Flask session secret.  Auto-generated if absent; set in production. |
