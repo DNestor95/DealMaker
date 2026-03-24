@@ -11,6 +11,17 @@
   {% endfor %}
 {% endwith %}
 
+<div class="form-card">
+  <section class="form-section">
+    <h2>Data Destination</h2>
+    <div class="form-row">
+      <label>TopRep Server URL <span class="badge badge--running">Fixed</span></label>
+      <input type="text" value="{{ fixed_destination }}" readonly disabled />
+      <p class="hint">Data is always sent to the TopRep Supabase server. This cannot be changed.</p>
+    </div>
+  </section>
+</div>
+
 {% set service_key_field = fields | selectattr('key', 'equalto', 'SUPABASE_SERVICE_ROLE_KEY') | first %}
 {% if service_key_field and not service_key_field.configured %}
 <div class="alert alert--warning">
@@ -20,7 +31,7 @@
 
 <form method="POST" action="{{ url_for('settings.save_settings') }}" class="form-card">
   <section class="form-section">
-    <h2>TopRep Connection</h2>
+    <h2>Credentials</h2>
     {% for field in fields %}
     <div class="form-row">
       <label for="{{ field.key }}">
