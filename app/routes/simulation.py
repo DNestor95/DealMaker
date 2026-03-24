@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -18,9 +19,11 @@ from flask import Blueprint, jsonify, request
 
 from app.routes.stores import _stores, _parse_hire_dates
 
+# Absolute path to the project root so output/ is always found regardless of CWD.
+_APP_ROOT = Path(__file__).parent.parent.parent
+
 # Import core generation helpers from v1 generator (still valid in v2)
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(_APP_ROOT))
 from dealmaker_generator import build_team, generate_events, normalize_delivery_url, send_events_to_api
 
 bp = Blueprint("simulation", __name__, url_prefix="/simulation")
@@ -54,7 +57,7 @@ class _StoreThread(threading.Thread):
         )
         batch = 0
 
-        output_dir = Path("output/stores")
+        output_dir = _APP_ROOT / "output" / "stores"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / f"{s['dealership_id']}.jsonl"
 

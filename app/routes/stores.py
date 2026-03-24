@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -30,12 +31,26 @@ from app.supabase_client import (
     seed_source_stage_priors,
 )
 
+# Absolute path to the project root so output/ is always found regardless of CWD.
+_APP_ROOT = Path(__file__).parent.parent.parent
+
+# Make the project root importable so dealmaker_generator can be found.
+sys.path.insert(0, str(_APP_ROOT))
+from dealmaker_generator import (  # noqa: E402
+    ARCHETYPES,
+    SCENARIO_REGISTRY,
+    build_team,
+    generate_events,
+    normalize_delivery_url,
+    send_events_to_api,
+)
+
 bp = Blueprint("stores", __name__)
 
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------
-_STORES_FILE = Path(__file__).parent.parent.parent / "output" / "stores_config.json"
+_STORES_FILE = _APP_ROOT / "output" / "stores_config.json"
 
 
 def _load_stores() -> dict[str, dict]:
@@ -260,7 +275,6 @@ def store_detail(store_id: str):
     toprep_url_configured = bool(os.getenv("TOPREP_APP_URL", ""))
     toprep_app_url = os.getenv("TOPREP_APP_URL", "").rstrip("/")
 
-    from dealmaker_generator import ARCHETYPES, SCENARIO_REGISTRY
     return render_template(
         "stores/detail.html",
         store=store,
@@ -298,11 +312,6 @@ def backfill_store(store_id: str):
 
     days = max(1, (end_dt - start_dt).days + 1)
 
-    import sys
-    from pathlib import Path as _Path
-    sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
-    from dealmaker_generator import build_team, generate_events, normalize_delivery_url, send_events_to_api
-
     team = build_team(
         salespeople=store["salespeople"],
         managers=store["managers"],
@@ -333,7 +342,7 @@ def backfill_store(store_id: str):
         scenarios=scenarios,
     )
 
-    output_dir = _Path("output/stores")
+    output_dir = _APP_ROOT / "output" / "stores"
     output_dir.mkdir(parents=True, exist_ok=True)
     out_file = output_dir / f"{store_id}_backfill_{start_str}_{end_str}.jsonl"
     with out_file.open("w", encoding="utf-8") as fh:
