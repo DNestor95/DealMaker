@@ -208,6 +208,42 @@
     </div>
   </section>
 
+  <!-- ── Time Acceleration ────────────────────────────────────────────── -->
+  <section class="form-section">
+    <h2>⏩ Time Acceleration</h2>
+    <p class="hint">Compress simulated time so a full month of CRM activity is delivered to TopRep in minutes rather than real calendar time.</p>
+
+    <div class="form-row">
+      <label for="sim_speed_preset">Speed Preset</label>
+      <select id="sim_speed_preset" name="sim_speed_preset" onchange="onSpeedChange(this.value)">
+        {% for key, preset in speed_presets.items() %}
+        <option value="{{ key }}" {% if store.sim_speed_preset == key %}selected{% endif %}>{{ preset.label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div id="custom-mult-row" class="form-row" style="display:none">
+      <label for="sim_speed_multiplier">Custom Multiplier <span class="muted">(sim-secs per real-sec)</span></label>
+      <input id="sim_speed_multiplier" name="sim_speed_multiplier" type="number"
+             value="{{ store.sim_speed_multiplier | default(720) }}" min="1" step="1" />
+    </div>
+
+    <div class="form-row-group" style="margin-top:12px">
+      <div class="form-row">
+        <label for="sim_days_total">Total Days to Simulate <span class="muted">(0 = run indefinitely)</span></label>
+        <input id="sim_days_total" name="sim_days_total" type="number"
+               value="{{ store.sim_days_total | default(0) }}" min="0" />
+      </div>
+      <div class="form-row">
+        <label for="sim_start_date">Simulation Start Date <span class="muted">(blank = now)</span></label>
+        <input id="sim_start_date" name="sim_start_date" type="date"
+               value="{{ store.sim_start_date | default('') }}" />
+      </div>
+    </div>
+
+    <div id="speed-hint" class="hint" style="margin-top:8px"></div>
+  </section>
+
   <!-- ── Runner Config ─────────────────────────────────────────────────── -->
   <section class="form-section">
     <h2>Runner Configuration</h2>
@@ -273,5 +309,30 @@ function renderHireDates(count) {
 
 // Render immediately on page load with current new_hire count
 renderHireDates(parseInt(document.getElementById('arch_new_hire').value) || 0);
+
+const SPEED_PRESETS = {{ speed_presets | tojson | safe }};
+
+function onSpeedChange(key) {
+  const customRow = document.getElementById('custom-mult-row');
+  const hint = document.getElementById('speed-hint');
+  customRow.style.display = key === 'custom' ? '' : 'none';
+
+  const preset = SPEED_PRESETS[key];
+  if (!preset) return;
+
+  if (key === 'realtime') {
+    hint.textContent = 'Events are generated for the current wall-clock time. Loop Interval below controls how often a new batch runs.';
+  } else if (key === 'custom') {
+    hint.textContent = 'Enter a multiplier: e.g. 720 = 1 month per hour.';
+  } else {
+    const mult = preset.multiplier;
+    const batchDays = parseFloat(document.getElementById('batch_days').value) || 1;
+    const sleepSec = (batchDays * 86400 / mult).toFixed(1);
+    hint.textContent = `Each ${batchDays}-day batch will be delivered every ~${sleepSec}s of real time (${preset.label}).`;
+  }
+}
+
+// Init hint on load
+onSpeedChange(document.getElementById('sim_speed_preset').value);
 </script>
 {% endblock %}

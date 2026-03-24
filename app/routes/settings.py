@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from flask import Blueprint, redirect, render_template, request, url_for
+from flask import Blueprint, flash, redirect, render_template, request, url_for
 
 bp = Blueprint("settings", __name__, url_prefix="/settings")
 
@@ -45,7 +45,12 @@ def settings():
 
 @bp.route("/", methods=["POST"])
 def save_settings():
-    env_path = Path(__file__).parent.parent.parent / ".env"
+    # On Vercel the project root is read-only; only /tmp is writable.
+    if os.environ.get("VERCEL"):
+        env_path = Path("/tmp/.env")
+    else:
+        env_path = Path(__file__).parent.parent.parent / ".env"
+
     existing: dict[str, str] = {}
 
     if env_path.exists():
@@ -63,6 +68,10 @@ def save_settings():
             os.environ[key] = new_val
 
     lines = [f'{k}="{v}"' for k, v in existing.items()]
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        flash("Settings saved.", "success")
+    except OSError as exc:
+        flash(f"Settings applied for this session but could not be persisted: {exc}", "warning")
 
     return redirect(url_for("settings.settings"))
