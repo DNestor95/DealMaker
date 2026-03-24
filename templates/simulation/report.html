@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}— Report: {{ store.dealership_id }}{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Simulation Report — <span style="color:var(--primary)">{{ store.dealership_id }}</span></h1>
+  <a class="btn btn--ghost btn--sm" href="{{ url_for('stores.store_detail', store_id=store.dealership_id) }}">← Back to Store</a>
+</div>
+
+{% if not stats %}
+<div class="alert alert--warning">
+  No simulation data found for this store yet.
+  <a href="{{ url_for('stores.store_detail', store_id=store.dealership_id) }}">Start a simulation</a> or run a backfill to generate events.
+</div>
+{% else %}
+
+<!-- ── Meta info ─────────────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:20px">
+  <p class="hint" style="margin:0">
+    Speed: <strong>{{ speed_label }}</strong> &nbsp;|&nbsp;
+    Output file: <code>{{ stats.file_path }}</code> &nbsp;|&nbsp;
+    Total events: <strong>{{ stats.total_events | default(0) }}</strong>
+  </p>
+</div>
+
+<div class="detail-grid">
+
+  <!-- ── Deal Summary ─── -->
+  <section class="card">
+    <h2>Deal Summary</h2>
+    <table class="kv-table">
+      <tr><td>Total Deals Created</td><td><strong>{{ stats.total_deals }}</strong></td></tr>
+      <tr><td>Closed Won</td><td><strong class="success-text">{{ stats.closed_won }}</strong></td></tr>
+      <tr><td>Closed Lost</td><td><strong class="error-text">{{ stats.closed_lost }}</strong></td></tr>
+      <tr><td>Close Rate</td><td><strong>{{ stats.close_rate_pct }}%</strong></td></tr>
+      <tr><td>Avg Deal Amount</td><td>${{ "{:,.0f}".format(stats.avg_deal_amount) }}</td></tr>
+      <tr><td>Avg Gross Profit</td><td>${{ "{:,.0f}".format(stats.avg_gross_profit) }}</td></tr>
+    </table>
+  </section>
+
+  <!-- ── Event Types ─── -->
+  <section class="card">
+    <h2>Events by Type</h2>
+    <table class="kv-table">
+      {% for etype, count in stats.event_type_counts.items() | sort %}
+      <tr><td><code>{{ etype }}</code></td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  </section>
+
+  <!-- ── Activity Types ─── -->
+  <section class="card">
+    <h2>Activity Breakdown</h2>
+    {% if stats.activity_type_counts %}
+    <table class="kv-table">
+      {% for atype, count in stats.activity_type_counts.items() | sort(attribute='1', reverse=True) %}
+      <tr><td>{{ atype | title }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="hint">No activity events recorded.</p>
+    {% endif %}
+  </section>
+
+  <!-- ── Lead Sources ─── -->
+  <section class="card">
+    <h2>Deals by Lead Source</h2>
+    {% if stats.source_counts %}
+    <table class="kv-table">
+      {% for src, count in stats.source_counts.items() | sort(attribute='1', reverse=True) %}
+      <tr><td>{{ src | replace('_',' ') | title }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="hint">No source data recorded.</p>
+    {% endif %}
+  </section>
+
+  <!-- ── Top Reps ─── -->
+  <section class="card card--wide">
+    <h2>Top Reps by Event Volume <span class="hint" style="font-weight:normal;font-size:0.85rem">(top 20)</span></h2>
+    {% if stats.top_reps %}
+    {% set max_count = stats.top_reps[0][1] %}
+    <table class="table">
+      <thead><tr><th>#</th><th>Rep ID</th><th>Events</th><th>Share</th></tr></thead>
+      <tbody>
+        {% for rep_id, count in stats.top_reps %}
+        {% set share = (count / stats.total_events * 100) | round(1) %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td><code>{{ rep_id }}</code></td>
+          <td>{{ count }}</td>
+          <td>
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="width:120px;height:8px;background:var(--border);border-radius:4px;overflow:hidden">
+                <div style="width:{{ (count / max_count * 100) | round(0) | int }}%;height:100%;background:var(--primary);border-radius:4px"></div>
+              </div>
+              <span>{{ share }}%</span>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="hint">No rep data available.</p>
+    {% endif %}
+  </section>
+
+  <!-- ── Daily Deal Volume ─── -->
+  <section class="card card--wide">
+    <h2>Daily Deal Volume (deals created per day)</h2>
+    {% if stats.daily_deals %}
+    <div style="overflow-x:auto">
+      <table class="table">
+        <thead><tr><th>Date</th><th>Deals</th><th>Volume</th></tr></thead>
+        <tbody>
+          {% set max_daily = stats.daily_deals | map(attribute=1) | max %}
+          {% for day, count in stats.daily_deals %}
+          <tr>
+            <td>{{ day }}</td>
+            <td>{{ count }}</td>
+            <td>
+              {% if max_daily > 0 %}
+              <div style="width:{{ (count / max_daily * 300) | round(0) | int }}px;height:14px;background:var(--primary);border-radius:3px;opacity:0.8"></div>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="hint">No daily data recorded.</p>
+    {% endif %}
+  </section>
+
+</div>
+
+<div style="margin-top:24px;text-align:right">
+  <a class="btn btn--ghost btn--sm" href="{{ url_for('simulation.report', store_id=store.dealership_id) }}">↻ Refresh Report</a>
+</div>
+
+{% endif %}
+{% endblock %}

@@ -9,6 +9,7 @@ GET  /stores/<id>/edit   → edit store form (pre-populated)
 POST /stores/<id>/edit   → save edits in-place
 POST /stores/<id>/delete      → remove store from session + persistence
 POST /stores/<id>/backfill    → generate historical data for a date range
+GET  /stores/<id>/sync-info   → JSON: rep UUIDs + sim params for TopRep alignment
 POST /stores/<id>/provision   → provision QA auth users for all reps
 POST /stores/<id>/deprovision → delete provisioned auth users
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -35,6 +37,12 @@ bp = Blueprint("stores", __name__)
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------
+_APP_ROOT = Path(__file__).parent.parent.parent
+_STORES_FILE = _APP_ROOT / "output" / "stores_config.json"
+
+# Ensure dealmaker_generator is importable without repeated path manipulation.
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
 # On Vercel the project filesystem is read-only; only /tmp is writable.
 if os.environ.get("VERCEL"):
     _STORES_FILE = Path("/tmp/stores_config.json")
@@ -101,6 +109,27 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         else:
             new_hire_dates.append(None)
 
+    # Time-acceleration: validate custom multiplier
+    raw_mult = data.get("sim_speed_multiplier", "").strip()
+    try:
+        sim_speed_multiplier = max(1.0, float(raw_mult)) if raw_mult else 1.0
+    except ValueError:
+        sim_speed_multiplier = 1.0
+
+    raw_days_total = data.get("sim_days_total", "").strip()
+    try:
+        sim_days_total = max(0, int(raw_days_total)) if raw_days_total else 0
+    except ValueError:
+        sim_days_total = 0
+
+    # Validate sim_start_date format
+    raw_sim_start = data.get("sim_start_date", "").strip()
+    if raw_sim_start:
+        try:
+            date.fromisoformat(raw_sim_start)
+        except ValueError:
+            raw_sim_start = ""
+
     return {
         "dealership_id": store_id,
         "salespeople": int(data.get("salespeople", 8)),
@@ -127,6 +156,11 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         "batch_days": int(data.get("batch_days", 1)),
         "every_seconds": int(data.get("every_seconds", 10)),
         "seed": int(data.get("seed", 42)),
+        # Time-acceleration fields
+        "sim_speed_preset": data.get("sim_speed_preset", "realtime"),
+        "sim_speed_multiplier": sim_speed_multiplier,
+        "sim_days_total": sim_days_total,
+        "sim_start_date": raw_sim_start,
         # Preserve runtime-only fields
         "status": (existing or {}).get("status", "stopped"),
         "events_sent": (existing or {}).get("events_sent", 0),
@@ -145,6 +179,11 @@ for _s in _stores.values():
     _s.setdefault("events_sent", 0)
     _s.setdefault("credentials", [])
     _s.setdefault("new_hire_dates", [])
+    # Time-acceleration defaults for stores created before this feature
+    _s.setdefault("sim_speed_preset", "realtime")
+    _s.setdefault("sim_speed_multiplier", 1.0)
+    _s.setdefault("sim_days_total", 0)
+    _s.setdefault("sim_start_date", "")
 
 
 STORE_TEMPLATES = {
@@ -162,6 +201,17 @@ STORE_TEMPLATES = {
                         "archetype_dist": {"rockstar": 1, "solid_mid": 4, "underperformer": 1, "new_hire": 0}},
 }
 
+# Speed presets shared between stores (form) and simulation (thread logic).
+# multiplier = simulated seconds per real second.
+SPEED_PRESETS: dict[str, dict] = {
+    "realtime":         {"label": "Realtime (1×)",               "multiplier": 1.0},
+    "1day_per_minute":  {"label": "1 day per minute (1,440×)",   "multiplier": 1440.0},
+    "1week_per_hour":   {"label": "1 week per hour (168×)",      "multiplier": 168.0},
+    "1month_per_hour":  {"label": "1 month per hour (720×)",     "multiplier": 720.0},
+    "1month_per_10min": {"label": "1 month per 10 min (4,320×)", "multiplier": 4320.0},
+    "custom":           {"label": "Custom multiplier",           "multiplier": None},
+}
+
 _FORM_CONTEXT = dict(
     lead_sources=["internet", "phone", "showroom", "referral", "service", "walkin"],
     deal_statuses=["lead", "qualified", "proposal", "negotiation", "closed_won", "closed_lost"],
@@ -175,6 +225,7 @@ _FORM_CONTEXT = dict(
     scenario_keys=["slow_industry_month", "manager_on_vacation", "bdc_underperforming",
                    "inventory_shortage", "strong_incentive_month", "high_heat_weekend"],
     month_shapes=["flat", "realistic", "front_loaded"],
+    speed_presets=SPEED_PRESETS,
 )
 
 
@@ -274,6 +325,7 @@ def store_detail(store_id: str):
         service_key_configured=service_key_configured,
         toprep_url_configured=toprep_url_configured,
         toprep_app_url=toprep_app_url,
+        speed_presets=SPEED_PRESETS,
     )
 
 
@@ -283,6 +335,83 @@ def delete_store(store_id: str):
     _save_stores(_stores)
     flash(f"Store '{store_id}' deleted.", "info")
     return redirect(url_for("stores.index"))
+
+
+@bp.route("/stores/<store_id>/sync-info")
+def sync_info(store_id: str):
+    """Return the deterministic rep UUIDs and simulation parameters needed
+    to align TopRep with the data DealMaker will generate.
+
+    GET  /stores/<store_id>/sync-info        → JSON
+    GET  /stores/<store_id>/sync-info?fmt=html  → redirect to detail page panel (anchor)
+    """
+    store = _stores.get(store_id)
+    if not store:
+        return jsonify({"error": "Store not found"}), 404
+
+    from dealmaker_generator import build_team, sales_rep_uuid
+
+    team = build_team(
+        salespeople=store["salespeople"],
+        managers=store["managers"],
+        bdc_agents=store["bdc_agents"],
+        archetype_dist=store.get("archetype_dist"),
+        new_hire_dates=_parse_hire_dates(store),
+    )
+
+    reps = []
+    for member in team:
+        rep_uuid = sales_rep_uuid(store_id, member)
+        reps.append({
+            "name": member.name,
+            "role": member.role,
+            "archetype": member.archetype,
+            "member_id": member.member_id,
+            "sales_rep_id": rep_uuid,
+        })
+
+    # Compute expected event volume range based on store config
+    daily_leads = store.get("daily_leads", 20)
+    batch_days = store.get("batch_days", 1)
+    activities_min = store.get("activities_per_deal_min", 2)
+    activities_max = store.get("activities_per_deal_max", 6)
+    # events per lead: 1 deal.created + ~N status changes (3-5) + 2*activities
+    events_low = daily_leads * batch_days * (1 + 2 + 2 * activities_min)
+    events_high = daily_leads * batch_days * (1 + 5 + 2 * activities_max)
+
+    sim_start = store.get("sim_start_date") or "wall clock (now)"
+    sim_days = store.get("sim_days_total", 0)
+    speed_label = SPEED_PRESETS.get(
+        store.get("sim_speed_preset", "realtime"),
+        SPEED_PRESETS["realtime"],
+    )["label"]
+
+    payload = {
+        "dealership_id": store_id,
+        "simulation": {
+            "start_date": sim_start,
+            "total_days": sim_days if sim_days else "indefinite",
+            "speed_preset": store.get("sim_speed_preset", "realtime"),
+            "speed_label": speed_label,
+            "batch_days": batch_days,
+            "daily_leads": daily_leads,
+            "close_rate_pct": store.get("close_rate_pct", 36),
+            "seed": store.get("seed", 42),
+            "month_shape": store.get("month_shape", "flat"),
+            "default_scenarios": store.get("default_scenarios", []),
+            "est_events_per_batch": f"{events_low}–{events_high}",
+        },
+        "event_contract": {
+            "types": ["deal.created", "deal.status_changed", "activity.scheduled",
+                      "activity.completed", "rep_quota_updated"],
+            "status_field_for_deal_status_changed": "new_status",
+            "timestamps": "UTC ISO-8601 (simulated time — not wall clock)",
+            "deal_id_algorithm": "uuid5(NAMESPACE_URL, 'deal|<dealership_id>|<YYYYMMDD>|<n>')",
+            "rep_id_algorithm": "uuid5(NAMESPACE_URL, 'sales_rep|<dealership_id>|<member_id>')",
+        },
+        "reps": reps,
+    }
+    return jsonify(payload)
 
 
 @bp.route("/stores/<store_id>/backfill", methods=["POST"])
@@ -302,9 +431,6 @@ def backfill_store(store_id: str):
 
     days = max(1, (end_dt - start_dt).days + 1)
 
-    import sys
-    from pathlib import Path as _Path
-    sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
     from dealmaker_generator import build_team, generate_events
 
     team = build_team(
@@ -337,7 +463,7 @@ def backfill_store(store_id: str):
         scenarios=scenarios,
     )
 
-    output_dir = _Path("output/stores")
+    output_dir = _APP_ROOT / "output" / "stores"
     output_dir.mkdir(parents=True, exist_ok=True)
     out_file = output_dir / f"{store_id}_backfill_{start_str}_{end_str}.jsonl"
     with out_file.open("w", encoding="utf-8") as fh:

@@ -1,3 +1,4 @@
+from flask import Flask, jsonify
 from flask import Flask, Response, redirect, request, session, url_for
 import os
 import secrets
@@ -20,6 +21,9 @@ def create_app() -> Flask:
     app.register_blueprint(simulation_bp)
     app.register_blueprint(settings_bp)
 
+    @app.get("/health")
+    def health():
+        return jsonify({"status": "ok"})
     @app.before_request
     def require_login() -> Response | None:
         if request.endpoint in _PUBLIC_ENDPOINTS:
