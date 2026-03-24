@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 import os
 import secrets
 
@@ -14,5 +14,9 @@ def create_app() -> Flask:
     app.register_blueprint(stores_bp)
     app.register_blueprint(simulation_bp)
     app.register_blueprint(settings_bp)
+
+    @app.get("/health")
+    def health():
+        return jsonify({"status": "ok"})
 
     return app

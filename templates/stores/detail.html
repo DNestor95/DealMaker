@@ -308,6 +308,58 @@
     {% endif %}
   </section>
 
+  <!-- ── TopRep Sync Info ─── -->
+  <section class="card card--wide" id="sync-info">
+    <h2>🔗 TopRep Sync Info</h2>
+    <p class="hint">
+      These are the <strong>deterministic rep UUIDs</strong> and simulation parameters DealMaker will use.
+      Give them to TopRep so it can map incoming events to the correct rep profiles.
+      All IDs are stable — the same store ID + seed always produces the same UUIDs.
+    </p>
+
+    <div class="btn-row" style="margin-bottom:16px">
+      <a class="btn btn--sm btn--ghost"
+         href="{{ url_for('stores.sync_info', store_id=store.dealership_id) }}"
+         target="_blank" rel="noopener noreferrer">
+        📋 View full JSON ↗
+      </a>
+      <button class="btn btn--sm btn--ghost" onclick="copySyncInfo()">📋 Copy JSON</button>
+    </div>
+
+    <!-- Sim params summary -->
+    <div class="form-row-group" style="margin-bottom:16px">
+      <div style="background:var(--bg-card-alt, var(--bg));border:1px solid var(--border);border-radius:6px;padding:12px 16px">
+        <table class="kv-table" style="margin:0">
+          <tr><td>Dealership ID</td><td><code>{{ store.dealership_id }}</code></td></tr>
+          <tr><td>Simulation Start</td><td>{{ store.sim_start_date | default('wall clock (now)', true) }}</td></tr>
+          <tr><td>Total Simulated Days</td><td>{{ store.sim_days_total if store.sim_days_total else 'Indefinite' }}</td></tr>
+          <tr><td>Speed</td><td>{{ speed_presets.get(store.sim_speed_preset | default('realtime'), speed_presets['realtime']).label }}</td></tr>
+          <tr><td>Seed</td><td>{{ store.seed }}</td></tr>
+          <tr><td>Daily Leads</td><td>{{ store.daily_leads }}</td></tr>
+          <tr><td>Close Rate</td><td>{{ store.close_rate_pct }}%</td></tr>
+          <tr><td>Timestamps</td><td>UTC ISO-8601 (simulated — not wall clock)</td></tr>
+          <tr><td>Deal status field</td><td><code>new_status</code> (in <code>deal.status_changed</code>)</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- Rep UUID table -->
+    <table class="table" id="sync-rep-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Name</th>
+          <th>Role</th>
+          <th>Archetype</th>
+          <th>sales_rep_id (UUID)</th>
+        </tr>
+      </thead>
+      <tbody id="sync-rep-body">
+        <tr><td colspan="5" class="hint">Loading rep UUIDs…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
 </div>
 
 <script>
@@ -424,6 +476,67 @@ function downloadCSV() {
   a.href = URL.createObjectURL(blob);
   a.download = '{{ store.dealership_id }}_credentials.csv';
   a.click();
+}
+
+// ── TopRep Sync Info ──────────────────────────────────────────────────────
+let _syncInfoCache = null;
+
+function _esc(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function loadSyncInfo() {
+  if (_syncInfoCache) return;
+  fetch('/stores/{{ store.dealership_id }}/sync-info')
+    .then(r => r.json())
+    .then(data => {
+      _syncInfoCache = data;
+      const tbody = document.getElementById('sync-rep-body');
+      if (!tbody) return;
+      const reps = data.reps || [];
+      if (!reps.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="hint">No reps found.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = reps.map((rep, i) => `
+        <tr>
+          <td>${i + 1}</td>
+          <td>${_esc(rep.name)}</td>
+          <td>${_esc(rep.role)}</td>
+          <td><span class="tag">${_esc(rep.archetype.replace(/_/g,' '))}</span></td>
+          <td><code>${_esc(rep.sales_rep_id)}</code></td>
+        </tr>`).join('');
+    })
+    .catch(e => {
+      const tbody = document.getElementById('sync-rep-body');
+      if (tbody) {
+        tbody.innerHTML = '<tr><td colspan="5" class="error-text">Failed to load sync info.</td></tr>';
+      }
+    });
+}
+
+function copySyncInfo() {
+  const doIt = (data) => navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+  if (_syncInfoCache) { doIt(_syncInfoCache); return; }
+  fetch('/stores/{{ store.dealership_id }}/sync-info')
+    .then(r => r.json())
+    .then(data => { _syncInfoCache = data; doIt(data); })
+    .catch(() => {});
+}
+
+// Load sync info when the section scrolls into view (IntersectionObserver)
+const _syncSection = document.getElementById('sync-info');
+if (_syncSection && 'IntersectionObserver' in window) {
+  new IntersectionObserver((entries, obs) => {
+    if (entries.length > 0 && entries[0].isIntersecting) {
+      loadSyncInfo();
+      obs.disconnect();
+    }
+  }, { threshold: 0.1 }).observe(_syncSection);
+} else if (_syncSection) {
+  loadSyncInfo();
 }
 </script>
 {% endblock %}

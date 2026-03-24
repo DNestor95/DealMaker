@@ -26,6 +26,9 @@ from dealmaker_generator import build_team, generate_events
 
 bp = Blueprint("simulation", __name__, url_prefix="/simulation")
 
+# Absolute path to project root — avoids CWD-relative bugs in production.
+_APP_ROOT = Path(__file__).parent.parent.parent
+
 # ---------------------------------------------------------------------------
 # Running thread registry
 # ---------------------------------------------------------------------------
@@ -97,7 +100,7 @@ class _StoreThread(threading.Thread):
         )
         batch = 0
 
-        output_dir = Path("output/stores")
+        output_dir = _APP_ROOT / "output" / "stores"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / f"{s['dealership_id']}.jsonl"
 
@@ -213,7 +216,7 @@ def status(store_id: str):
 
 def _build_report(store_id: str) -> dict | None:
     """Parse the store's JSONL output file and return aggregated stats."""
-    output_file = Path("output/stores") / f"{store_id}.jsonl"
+    output_file = _APP_ROOT / "output" / "stores" / f"{store_id}.jsonl"
     if not output_file.exists():
         return None
 
@@ -263,10 +266,11 @@ def _build_report(store_id: str) -> dict | None:
                     daily_deals[day_key] += 1
 
             elif ev_type == "deal.status_changed":
-                to_stage = payload.get("to_stage", "")
-                if to_stage == "closed_won":
+                # Generator uses "new_status" (per REALTIME_DATA_INGEST_REFERENCE.md contract).
+                new_status = payload.get("new_status", "")
+                if new_status == "closed_won":
                     close_won += 1
-                elif to_stage == "closed_lost":
+                elif new_status == "closed_lost":
                     close_lost += 1
 
             elif ev_type == "activity.completed":
