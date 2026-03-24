@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -31,6 +32,29 @@ ACTIVITY_OUTCOMES = [
     "follow_up",
 ]
 DEAL_SOURCES = ["internet", "phone", "walk_in", "referral", "third_party"]
+
+# ---------------------------------------------------------------------------
+# TopRep API contract — source of truth: REALTIME_DATA_INGEST_REFERENCE.md
+# ---------------------------------------------------------------------------
+
+ALLOWED_EVENT_TYPES: list[str] = [
+    "deal.created",
+    "deal.status_changed",
+    "activity.scheduled",
+    "activity.completed",
+    "rep_quota_updated",
+]
+
+# Required payload keys per event type (optional keys are not listed)
+REQUIRED_PAYLOAD_KEYS: dict[str, list[str]] = {
+    "deal.created":        ["deal_id", "customer_name", "deal_amount", "source"],
+    "deal.status_changed": ["deal_id", "old_status", "new_status"],
+    "activity.scheduled":  ["activity_id", "activity_type", "scheduled_for"],
+    "activity.completed":  ["activity_id", "activity_type", "outcome"],
+    "rep_quota_updated":   ["month", "old_quota", "new_quota"],
+}
+
+_ISO_WITH_MS_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 # ---------------------------------------------------------------------------
 # Rep Archetypes
@@ -928,6 +952,99 @@ def send_events_to_api(
     return {"sent": sent, "failed": failed, "errors": errors}
 
 
+def validate_event(event: Event) -> list[str]:
+    """Validate a single event against the TopRep API contract.
+
+    Returns a (possibly empty) list of human-readable error strings.
+    An empty list means the event is contract-compliant.
+    """
+    errors: list[str] = []
+
+    # --- Envelope ---
+    if not event.sales_rep_id:
+        errors.append("missing sales_rep_id")
+    else:
+        try:
+            uuid.UUID(event.sales_rep_id)
+        except ValueError:
+            errors.append(f"sales_rep_id is not a valid UUID: {event.sales_rep_id!r}")
+
+    if event.type not in ALLOWED_EVENT_TYPES:
+        errors.append(f"unknown event type: {event.type!r}; allowed={ALLOWED_EVENT_TYPES}")
+
+    if not event.created_at:
+        errors.append("missing created_at")
+    elif not _ISO_WITH_MS_Z_RE.match(event.created_at):
+        errors.append(
+            f"created_at must be UTC ISO-8601 with milliseconds and Z suffix "
+            f"(e.g. 2026-03-03T15:04:05.000Z); got {event.created_at!r}"
+        )
+
+    # --- Payload keys ---
+    required_keys = REQUIRED_PAYLOAD_KEYS.get(event.type, [])
+    for key in required_keys:
+        if key not in event.payload:
+            errors.append(f"payload missing required key {key!r} for type {event.type!r}")
+
+    # --- Enum values ---
+    if event.type in ("activity.scheduled", "activity.completed"):
+        at = event.payload.get("activity_type")
+        if at and at not in ACTIVITY_TYPES:
+            errors.append(
+                f"activity_type {at!r} not in allowed values {ACTIVITY_TYPES}"
+            )
+
+    if event.type == "activity.completed":
+        outcome = event.payload.get("outcome")
+        if outcome and outcome not in ACTIVITY_OUTCOMES:
+            errors.append(
+                f"outcome {outcome!r} not in allowed values {ACTIVITY_OUTCOMES}"
+            )
+
+    if event.type == "deal.status_changed":
+        for field_name in ("old_status", "new_status"):
+            val = event.payload.get(field_name)
+            if val and val not in STATUS_VALUES:
+                errors.append(
+                    f"{field_name} {val!r} not in allowed values {STATUS_VALUES}"
+                )
+
+    return errors
+
+
+def validate_events(events: list[Event]) -> dict[str, Any]:
+    """Validate all events and return a summary dict.
+
+    Keys:
+        total      – total event count
+        valid      – count of events with zero errors
+        invalid    – count of events with at least one error
+        errors     – list of dicts {index, type, errors} for invalid events (capped at 20)
+        passed     – True when invalid == 0
+    """
+    total = len(events)
+    valid = 0
+    invalid = 0
+    error_samples: list[dict[str, Any]] = []
+
+    for idx, event in enumerate(events):
+        errs = validate_event(event)
+        if errs:
+            invalid += 1
+            if len(error_samples) < 20:
+                error_samples.append({"index": idx, "type": event.type, "errors": errs})
+        else:
+            valid += 1
+
+    return {
+        "total": total,
+        "valid": valid,
+        "invalid": invalid,
+        "errors": error_samples,
+        "passed": invalid == 0,
+    }
+
+
 def validate_api_settings(api_url: str, auth_token: str, supabase_apikey: str = "") -> None:
     if not api_url:
         raise ValueError("API URL is required for API delivery")
@@ -1016,6 +1133,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--format", choices=["jsonl", "csv"], default="jsonl", help="Output format")
     parser.add_argument("--output", default="output/events.jsonl", help="Output file path")
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        default=False,
+        help="After generating events, validate each event against the TopRep API contract and print a compliance report",
+    )
     return parser.parse_args()
 
 
@@ -1084,6 +1207,10 @@ def main() -> None:
             max_retries=max(0, args.max_retries),
         )
 
+    schema_report: dict[str, Any] | None = None
+    if args.validate:
+        schema_report = validate_events(events)
+
     print(
         json.dumps(
             {
@@ -1103,10 +1230,14 @@ def main() -> None:
                     "rep_quota_updated",
                 ],
                 "api_result": api_result,
+                "schema_validation": schema_report,
             },
             indent=2,
         )
     )
+
+    if schema_report and not schema_report["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
