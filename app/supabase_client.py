@@ -35,15 +35,33 @@ _load_env()
 _DEFAULT_BASE_CLOSE_RATE = 0.36
 
 
+def _api_url() -> str:
+    """Return the configured API/Supabase base URL.
+
+    Checks ``TOPREP_API_URL`` first; falls back to ``VITE_SUPABASE_URL``
+    (the Vite/frontend convention introduced by Supabase's publishable-key guide).
+    """
+    return os.getenv("TOPREP_API_URL") or os.getenv("VITE_SUPABASE_URL", "")
+
+
+def _anon_key() -> str:
+    """Return the configured Supabase anon/publishable key.
+
+    Checks ``SUPABASE_ANON_KEY`` first; falls back to
+    ``VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY`` (the Vite convention).
+    """
+    return os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "")
+
+
 def _base_url() -> str:
-    url = os.getenv("TOPREP_API_URL", "").rstrip("/")
+    url = _api_url().rstrip("/")
     # Strip down to the Supabase project root
     return url.split("/functions/")[0].split("/rest/")[0]
 
 
 def _headers() -> dict[str, str]:
     token = os.getenv("TOPREP_AUTH_TOKEN", "")
-    apikey = os.getenv("SUPABASE_ANON_KEY", "")
+    apikey = _anon_key()
     h: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -78,12 +96,12 @@ def check_connection() -> dict:
     if not base:
         return {"ok": False, "error": "TOPREP_API_URL is not configured."}
 
-    apikey = os.getenv("SUPABASE_ANON_KEY", "")
+    apikey = _anon_key()
     token = os.getenv("TOPREP_AUTH_TOKEN", "")
     if not apikey and not token:
         return {
             "ok": False,
-            "error": "No credentials configured — set SUPABASE_ANON_KEY and/or TOPREP_AUTH_TOKEN.",
+            "error": "No credentials configured — set SUPABASE_ANON_KEY (or VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY) and/or TOPREP_AUTH_TOKEN.",
         }
 
     url = f"{base}/rest/v1/"
@@ -151,7 +169,7 @@ def post_event(event: dict) -> dict:
     """
     from urllib.parse import urlparse
 
-    api_url = os.getenv("TOPREP_API_URL", "").rstrip("/")
+    api_url = _api_url().rstrip("/")
     if not api_url:
         return {"error": "TOPREP_API_URL not configured"}
 

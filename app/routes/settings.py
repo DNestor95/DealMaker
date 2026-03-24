@@ -17,6 +17,8 @@ ENV_KEYS = [
     ("TOPREP_API_URL", "TopRep API URL", False),
     ("TOPREP_AUTH_TOKEN", "Auth Token (JWT)", True),
     ("SUPABASE_ANON_KEY", "Supabase Anon Key", True),
+    ("VITE_SUPABASE_URL", "Supabase URL (Vite)", False),
+    ("VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "Supabase Publishable Key (Vite)", True),
     ("SUPABASE_SERVICE_ROLE_KEY", "Supabase Service Role Key (Admin Auth)", True),
     ("TOPREP_APP_URL", "TopRep App URL (for QA login links)", False),
 ]
