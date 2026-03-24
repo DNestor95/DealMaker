@@ -31,3 +31,6 @@ output/
 # OS
 .DS_Store
 Thumbs.db
+
+# Gunicorn runtime socket (created at process start, not a source file)
+*.ctl

@@ -32,22 +32,26 @@ from app.supabase_client import (
     seed_source_stage_priors,
 )
 
+# Absolute path to the project root so output/ is always found regardless of CWD.
+_APP_ROOT = Path(__file__).parent.parent.parent
+
+# Make the project root importable so dealmaker_generator can be found.
+sys.path.insert(0, str(_APP_ROOT))
+from dealmaker_generator import (  # noqa: E402
+    ARCHETYPES,
+    SCENARIO_REGISTRY,
+    build_team,
+    generate_events,
+    normalize_delivery_url,
+    send_events_to_api,
+)
+
 bp = Blueprint("stores", __name__)
 
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------
-_APP_ROOT = Path(__file__).parent.parent.parent
 _STORES_FILE = _APP_ROOT / "output" / "stores_config.json"
-
-# Ensure dealmaker_generator is importable without repeated path manipulation.
-if str(_APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(_APP_ROOT))
-# On Vercel the project filesystem is read-only; only /tmp is writable.
-if os.environ.get("VERCEL"):
-    _STORES_FILE = Path("/tmp/stores_config.json")
-else:
-    _STORES_FILE = Path(__file__).parent.parent.parent / "output" / "stores_config.json"
 
 
 def _load_stores() -> dict[str, dict]:
@@ -315,7 +319,6 @@ def store_detail(store_id: str):
     toprep_url_configured = bool(os.getenv("TOPREP_APP_URL", ""))
     toprep_app_url = os.getenv("TOPREP_APP_URL", "").rstrip("/")
 
-    from dealmaker_generator import ARCHETYPES, SCENARIO_REGISTRY
     return render_template(
         "stores/detail.html",
         store=store,
@@ -431,8 +434,6 @@ def backfill_store(store_id: str):
 
     days = max(1, (end_dt - start_dt).days + 1)
 
-    from dealmaker_generator import build_team, generate_events
-
     team = build_team(
         salespeople=store["salespeople"],
         managers=store["managers"],
@@ -472,11 +473,14 @@ def backfill_store(store_id: str):
 
     errors_count = 0
     if delivery in {"api", "both"}:
-        from app.supabase_client import post_event
-        for ev in events:
-            result = post_event(ev.to_dict())
-            if "error" in result:
-                errors_count += 1
+        api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", ""))
+        auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
+        supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "")
+        if api_url:
+            result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
+            errors_count = result["failed"]
+        else:
+            errors_count = len(events)
 
     return jsonify({
         "events": len(events),
