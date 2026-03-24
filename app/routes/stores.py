@@ -35,7 +35,11 @@ bp = Blueprint("stores", __name__)
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------
-_STORES_FILE = Path(__file__).parent.parent.parent / "output" / "stores_config.json"
+# On Vercel the project filesystem is read-only; only /tmp is writable.
+if os.environ.get("VERCEL"):
+    _STORES_FILE = Path("/tmp/stores_config.json")
+else:
+    _STORES_FILE = Path(__file__).parent.parent.parent / "output" / "stores_config.json"
 
 
 def _load_stores() -> dict[str, dict]:
