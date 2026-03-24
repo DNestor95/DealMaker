@@ -34,23 +34,34 @@ _load_env()
 # Default base close rate — matches generate_events() default; used for prior auto-calculation
 _DEFAULT_BASE_CLOSE_RATE = 0.36
 
+# Fixed TopRep Supabase project credentials — data is always sent here.
+# The publishable key is safe to include in source; it is not a secret.
+_TOPREP_SUPABASE_URL = "https://ahimfdfuuefesgbbnccr.supabase.co"
+_TOPREP_PUBLISHABLE_KEY = "sb_publishable_SABMCFFXgDOvyvTvJWH0_w_qREoAIpS"
+
 
 def _api_url() -> str:
     """Return the configured API/Supabase base URL.
 
-    Checks ``TOPREP_API_URL`` first; falls back to ``VITE_SUPABASE_URL``
-    (the Vite/frontend convention introduced by Supabase's publishable-key guide).
+    Always resolves to the TopRep Supabase project.  ``TOPREP_API_URL`` and
+    ``VITE_SUPABASE_URL`` env vars are honoured if set, but the hard-coded
+    TopRep URL is the ultimate fallback so the destination can never be left
+    unconfigured.
     """
-    return os.getenv("TOPREP_API_URL") or os.getenv("VITE_SUPABASE_URL", "")
+    return os.getenv("TOPREP_API_URL") or os.getenv("VITE_SUPABASE_URL", _TOPREP_SUPABASE_URL)
 
 
 def _anon_key() -> str:
     """Return the configured Supabase anon/publishable key.
 
     Checks ``SUPABASE_ANON_KEY`` first; falls back to
-    ``VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY`` (the Vite convention).
+    ``VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY`` and finally to the hard-coded
+    TopRep publishable key so the app is always ready to send data.
     """
-    return os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "")
+    return (
+        os.getenv("SUPABASE_ANON_KEY")
+        or os.getenv("VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY", _TOPREP_PUBLISHABLE_KEY)
+    )
 
 
 def _base_url() -> str:
@@ -93,16 +104,6 @@ def check_connection() -> dict:
     ``{"ok": False, "error": "..."}`` on failure.
     """
     base = _base_url()
-    if not base:
-        return {"ok": False, "error": "TOPREP_API_URL is not configured."}
-
-    apikey = _anon_key()
-    token = os.getenv("TOPREP_AUTH_TOKEN", "")
-    if not apikey and not token:
-        return {
-            "ok": False,
-            "error": "No credentials configured — set SUPABASE_ANON_KEY (or VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY) and/or TOPREP_AUTH_TOKEN.",
-        }
 
     url = f"{base}/rest/v1/"
     try:
@@ -113,7 +114,7 @@ def check_connection() -> dict:
         if exc.code == 401:
             return {
                 "ok": False,
-                "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN and SUPABASE_ANON_KEY.",
+                "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
             }
         body = exc.read().decode("utf-8", errors="replace")[:300]
         return {"ok": False, "error": f"HTTP {exc.code}: {body}"}

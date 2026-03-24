@@ -3,6 +3,10 @@ Settings routes — view / update app-level configuration.
 
 GET  /settings   → show current .env values (masked)
 POST /settings   → update and persist to .env
+
+Note: the data destination (Supabase URL and publishable key) is fixed and
+cannot be changed via the UI.  Only credentials and optional app URL are
+user-configurable.
 """
 from __future__ import annotations
 
@@ -11,14 +15,15 @@ from pathlib import Path
 
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 
+from app.supabase_client import _TOPREP_SUPABASE_URL
+
 bp = Blueprint("settings", __name__, url_prefix="/settings")
 
+# Fields that users are allowed to edit.  Destination URL and publishable key
+# are intentionally excluded — the TopRep Supabase server is the only valid
+# target and the publishable key is baked into the application.
 ENV_KEYS = [
-    ("TOPREP_API_URL", "TopRep API URL", False),
     ("TOPREP_AUTH_TOKEN", "Auth Token (JWT)", True),
-    ("SUPABASE_ANON_KEY", "Supabase Anon Key", True),
-    ("VITE_SUPABASE_URL", "Supabase URL (Vite)", False),
-    ("VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "Supabase Publishable Key (Vite)", True),
     ("SUPABASE_SERVICE_ROLE_KEY", "Supabase Service Role Key (Admin Auth)", True),
     ("TOPREP_APP_URL", "TopRep App URL (for QA login links)", False),
 ]
@@ -42,7 +47,7 @@ def settings():
             "display": _mask(val) if (secret and val) else val,
             "configured": bool(val),
         })
-    return render_template("settings.html", fields=fields)
+    return render_template("settings.html", fields=fields, fixed_destination=_TOPREP_SUPABASE_URL)
 
 
 @bp.route("/", methods=["POST"])
