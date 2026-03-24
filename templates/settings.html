@@ -22,10 +22,54 @@
   </section>
 </div>
 
+<div class="form-card">
+  <section class="form-section">
+    <h2>How to get your Supabase JWT (Auth Token)</h2>
+    <p class="hint" style="margin-bottom:10px">
+      The <strong>Auth Token</strong> is a short-lived JWT issued by Supabase when you log in to
+      the TopRep app. You need to copy it from your browser session once and paste it below
+      (or add it as a Vercel Environment Variable).
+    </p>
+
+    <details style="margin-bottom:16px">
+      <summary style="cursor:pointer;font-weight:600">▶ Step-by-step: copy the token from the TopRep app</summary>
+      <ol style="margin:12px 0 0 18px;line-height:2">
+        <li>Open the <strong>TopRep app</strong> in your browser and log in with your email and password.</li>
+        <li>Open browser <strong>DevTools</strong>:
+          <ul style="margin-top:4px">
+            <li>Chrome / Edge: <kbd>F12</kbd> or <kbd>Ctrl+Shift+I</kbd> (Windows) / <kbd>⌘+Option+I</kbd> (Mac)</li>
+            <li>Firefox: <kbd>F12</kbd> or <kbd>Ctrl+Shift+I</kbd> (Windows) / <kbd>⌘+Option+I</kbd> (Mac)</li>
+          </ul>
+        </li>
+        <li>Go to the <strong>Application</strong> tab (Chrome/Edge) or <strong>Storage</strong> tab (Firefox).</li>
+        <li>In the left sidebar expand <strong>Local Storage</strong> and click the TopRep app origin
+            (e.g. <code>https://your-toprep-app.vercel.app</code>).</li>
+        <li>Look for a key that starts with <code>sb-</code> (e.g. <code>sb-ahimfdfuuefesgbbnccr-auth-token</code>).
+            Click it to see the JSON value.</li>
+        <li>In the JSON, find <code>"access_token"</code> and copy the long string value (it starts with <code>eyJ</code>).</li>
+        <li>Paste it into the <strong>Auth Token (JWT)</strong> field below and click <strong>Save Settings</strong>.</li>
+        <li>Click <strong>🔌 Test Connection</strong> to confirm DealMaker can reach Supabase with your token.</li>
+      </ol>
+      <p class="hint" style="margin-top:8px">
+        💡 <strong>Vercel users:</strong> instead of saving the token here (it would be lost on
+        redeploy), add <code>TOPREP_AUTH_TOKEN=&lt;your-token&gt;</code> in your Vercel project's
+        <em>Settings → Environment Variables</em> panel, then redeploy.  The token is automatically
+        read from the environment — you do not need to save it in the Settings form.
+      </p>
+      <p class="hint" style="margin-top:4px">
+        🔒 <strong>Security:</strong> this token grants access to data as <em>your</em> Supabase
+        user. Do not commit it to source control and do not share it. Tokens expire after ~1 hour;
+        refresh by logging in to the TopRep app again and repeating the steps above.
+      </p>
+    </details>
+  </section>
+</div>
+
 {% set service_key_field = fields | selectattr('key', 'equalto', 'SUPABASE_SERVICE_ROLE_KEY') | first %}
 {% if service_key_field and not service_key_field.configured %}
 <div class="alert alert--warning">
   ⚠ <strong>SUPABASE_SERVICE_ROLE_KEY</strong> is not set. Rep user provisioning (Phase 4) will be unavailable until this is configured.
+  <br><small>🔒 Never set the service-role key as a Vercel Environment Variable — it bypasses all RLS and grants full admin access to the database.</small>
 </div>
 {% endif %}
 

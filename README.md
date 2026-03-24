@@ -215,6 +215,51 @@ Notes:
 - `dealmaker_generator.py` and `dealmaker_gui.py` auto-load `.env` on startup.
 - CLI flags still override `.env` values.
 
+## Vercel deployment
+
+Use these steps when DealMaker itself is deployed to Vercel and you want it to send data to the TopRep Supabase database.
+
+### Environment variables
+
+| Variable | Required | Notes |
+|---|---|---|
+| `TOPREP_AUTH_TOKEN` | **Yes** | Supabase user JWT — see "How to get your token" below |
+| `FLASK_SECRET_KEY` | Recommended | Random string; auto-generated if absent but sessions won't persist across restarts |
+| `TOPREP_APP_URL` | Optional | TopRep app URL, used to generate QA login links |
+| `SUPABASE_SERVICE_ROLE_KEY` | **No** | ⚠ Never add this to Vercel — admin key, local dev only |
+
+> **Security note:** never add `SUPABASE_SERVICE_ROLE_KEY` as a Vercel Environment Variable. It bypasses all row-level security and grants full admin database access. Only use it in a local `.env` file when provisioning test users.
+
+### How to get your Supabase access token (JWT)
+
+1. Open the **TopRep app** in your browser and log in with your email and password.
+2. Open **DevTools**:
+   - Chrome / Edge: `F12` or `Ctrl+Shift+I` (Windows) / `⌘+Option+I` (Mac)
+   - Firefox: `F12` or `Ctrl+Shift+I` (Windows) / `⌘+Option+I` (Mac)
+3. Navigate to the **Application** tab (Chrome/Edge) or **Storage** tab (Firefox).
+4. In the left sidebar, expand **Local Storage** and click on the TopRep app origin (e.g. `https://your-toprep-app.vercel.app`).
+5. Find the key that starts with `sb-` — typically `sb-ahimfdfuuefesgbbnccr-auth-token`. Click it to reveal its JSON value.
+6. In the JSON object, locate `"access_token"` and copy the long string value (it begins with `eyJ`).
+
+> **Token lifetime:** Supabase access tokens expire after roughly one hour. When DealMaker returns a 401 error, repeat steps 1–6 to obtain a fresh token.
+
+### Adding the token to Vercel
+
+1. Go to your Vercel project dashboard → **Settings** → **Environment Variables**.
+2. Click **Add New**.
+3. Set **Name** to `TOPREP_AUTH_TOKEN` and paste the token into **Value**.
+4. Select the environments where it should apply (Production / Preview / Development as needed).
+5. Click **Save**, then **Redeploy** your project so the variable takes effect.
+
+### Verify the connection
+
+After deploying:
+
+1. Open the DealMaker web UI at your Vercel URL.
+2. Navigate to **Settings** (`/settings`).
+3. The `TOPREP_AUTH_TOKEN` field should show **Configured**.
+4. Click **🔌 Test Connection**.  A green banner confirms DealMaker can read from the TopRep Supabase database with your token.  A red banner will show the exact error (e.g. token expired or not set).
+
 ### Direct Supabase mode (without `/api/events`)
 
 If `TOPREP_API_URL` is set to `https://<project-ref>.supabase.co`, DealMaker writes to `.../rest/v1/events`.

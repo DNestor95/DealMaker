@@ -100,21 +100,48 @@ def _service_headers() -> dict[str, str]:
 def check_connection() -> dict:
     """Verify that the Supabase REST API is reachable with the configured credentials.
 
+    Checks that ``TOPREP_AUTH_TOKEN`` is configured and that it authenticates
+    successfully against the Supabase REST API by reading from the ``profiles``
+    table with ``limit=1``.  This validates both network connectivity and that
+    the JWT is current without writing any data.
+
     Returns ``{"ok": True, "message": "..."}`` on success or
     ``{"ok": False, "error": "..."}`` on failure.
     """
-    base = _base_url()
+    token = os.getenv("TOPREP_AUTH_TOKEN", "")
+    if not token:
+        return {
+            "ok": False,
+            "error": (
+                "TOPREP_AUTH_TOKEN is not configured. "
+                "Paste your Supabase access token in the field above and save, "
+                "or add it as a Vercel Environment Variable named TOPREP_AUTH_TOKEN."
+            ),
+        }
 
-    url = f"{base}/rest/v1/"
+    base = _base_url()
+    # Query a real table with limit=1 so Supabase validates the JWT.
+    # A 200 response proves both connectivity and valid authentication.
+    url = f"{base}/rest/v1/profiles?select=id&limit=1"
     try:
         req = request.Request(url, headers=_headers(), method="GET")
         with request.urlopen(req, timeout=10) as resp:
-            return {"ok": True, "message": f"Connected to Supabase (HTTP {resp.status})."}
+            return {
+                "ok": True,
+                "message": (
+                    f"Connected and authenticated (HTTP {resp.status}). "
+                    "TOPREP_AUTH_TOKEN is valid — DealMaker can send data."
+                ),
+            }
     except error.HTTPError as exc:
         if exc.code == 401:
             return {
                 "ok": False,
-                "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
+                "error": (
+                    "Authentication failed (HTTP 401) — TOPREP_AUTH_TOKEN is set but "
+                    "invalid or expired. Obtain a fresh token from the TopRep app "
+                    "(see Settings page for instructions) and save it here."
+                ),
             }
         body = exc.read().decode("utf-8", errors="replace")[:300]
         return {"ok": False, "error": f"HTTP {exc.code}: {body}"}
