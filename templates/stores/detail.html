@@ -25,11 +25,18 @@
     </div>
     <p class="meta">
       Events sent: <strong id="events-count">{{ store.events_sent }}</strong><br/>
-      Last error: <span id="last-error" class="error-text">—</span>
+      Last error: <span id="last-error" class="error-text">—</span><br/>
+      <span id="sim-time-row" style="display:none">
+        Simulated date: <strong id="sim-date">—</strong>
+        <span id="sim-progress-wrap" style="display:none">
+          &nbsp;(<span id="sim-progress">0</span>%)
+        </span>
+      </span>
     </p>
     <div style="margin-top:12px">
       <div class="btn-row">
         <a class="btn btn--sm btn--ghost" href="{{ url_for('stores.edit_store', store_id=store.dealership_id) }}">✏ Edit Store</a>
+        <a class="btn btn--sm btn--ghost" href="{{ url_for('simulation.report', store_id=store.dealership_id) }}">📊 View Report</a>
         <form method="POST" action="{{ url_for('stores.delete_store', store_id=store.dealership_id) }}"
               onsubmit="return confirm('Delete store {{ store.dealership_id }}?')" style="display:inline">
           <button class="btn btn--sm btn--danger" type="submit">🗑 Delete Store</button>
@@ -50,6 +57,30 @@
       <tr><td>Status Advance</td><td>{{ store.status_advance_pct }}%</td></tr>
       <tr><td>Activities / Deal</td><td>{{ store.activities_per_deal_min }}–{{ store.activities_per_deal_max }}</td></tr>
       <tr><td>Month Shape</td><td>{{ store.month_shape | default('flat') }}</td></tr>
+    </table>
+  </section>
+
+  <!-- ── Time Acceleration ─── -->
+  <section class="card">
+    <h2>⏩ Time Acceleration</h2>
+    {% set preset_key = store.sim_speed_preset | default('realtime') %}
+    {% set preset = speed_presets.get(preset_key, speed_presets['realtime']) %}
+    <table class="kv-table">
+      <tr><td>Speed Preset</td><td><strong>{{ preset.label }}</strong></td></tr>
+      {% if preset_key == 'custom' %}
+      <tr><td>Custom Multiplier</td><td>{{ store.sim_speed_multiplier | default(1) }}×</td></tr>
+      {% endif %}
+      <tr><td>Total Days</td>
+          <td>{% if store.sim_days_total %}{{ store.sim_days_total }} days{% else %}<em>Indefinite</em>{% endif %}</td>
+      </tr>
+      <tr><td>Start Date</td>
+          <td>{% if store.sim_start_date %}{{ store.sim_start_date }}{% else %}<em>Wall clock (now)</em>{% endif %}</td>
+      </tr>
+      {% if preset_key != 'realtime' %}
+      {% set mult = preset.multiplier or store.sim_speed_multiplier | default(1) %}
+      {% set sleep_sec = (store.batch_days * 86400 / mult) | round(1) %}
+      <tr><td>Batch interval</td><td>~{{ sleep_sec }}s real time / {{ store.batch_days }}-day batch</td></tr>
+      {% endif %}
     </table>
   </section>
 
@@ -291,6 +322,25 @@ setInterval(() => {
       document.getElementById('last-error').textContent = d.last_error || '—';
       document.getElementById('btn-start').disabled = d.status === 'running';
       document.getElementById('btn-stop').disabled  = d.status === 'stopped';
+
+      // Simulated time display (accelerated modes only)
+      const simRow = document.getElementById('sim-time-row');
+      const simDate = document.getElementById('sim-date');
+      const simProgressWrap = document.getElementById('sim-progress-wrap');
+      const simProgress = document.getElementById('sim-progress');
+      if (d.simulated_date && d.speed_preset && d.speed_preset !== 'realtime') {
+        simRow.style.display = '';
+        // Show just the date part of the ISO string for readability
+        simDate.textContent = d.simulated_date ? d.simulated_date.slice(0, 10) : '—';
+        if (d.progress_pct !== null && d.progress_pct !== undefined) {
+          simProgressWrap.style.display = '';
+          simProgress.textContent = d.progress_pct;
+        } else {
+          simProgressWrap.style.display = 'none';
+        }
+      } else {
+        simRow.style.display = 'none';
+      }
     })
     .catch(() => {});
 }, 3000);

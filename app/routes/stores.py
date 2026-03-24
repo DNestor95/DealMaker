@@ -97,6 +97,27 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         else:
             new_hire_dates.append(None)
 
+    # Time-acceleration: validate custom multiplier
+    raw_mult = data.get("sim_speed_multiplier", "").strip()
+    try:
+        sim_speed_multiplier = max(1.0, float(raw_mult)) if raw_mult else 1.0
+    except ValueError:
+        sim_speed_multiplier = 1.0
+
+    raw_days_total = data.get("sim_days_total", "").strip()
+    try:
+        sim_days_total = max(0, int(raw_days_total)) if raw_days_total else 0
+    except ValueError:
+        sim_days_total = 0
+
+    # Validate sim_start_date format
+    raw_sim_start = data.get("sim_start_date", "").strip()
+    if raw_sim_start:
+        try:
+            date.fromisoformat(raw_sim_start)
+        except ValueError:
+            raw_sim_start = ""
+
     return {
         "dealership_id": store_id,
         "salespeople": int(data.get("salespeople", 8)),
@@ -123,6 +144,11 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         "batch_days": int(data.get("batch_days", 1)),
         "every_seconds": int(data.get("every_seconds", 10)),
         "seed": int(data.get("seed", 42)),
+        # Time-acceleration fields
+        "sim_speed_preset": data.get("sim_speed_preset", "realtime"),
+        "sim_speed_multiplier": sim_speed_multiplier,
+        "sim_days_total": sim_days_total,
+        "sim_start_date": raw_sim_start,
         # Preserve runtime-only fields
         "status": (existing or {}).get("status", "stopped"),
         "events_sent": (existing or {}).get("events_sent", 0),
@@ -141,6 +167,11 @@ for _s in _stores.values():
     _s.setdefault("events_sent", 0)
     _s.setdefault("credentials", [])
     _s.setdefault("new_hire_dates", [])
+    # Time-acceleration defaults for stores created before this feature
+    _s.setdefault("sim_speed_preset", "realtime")
+    _s.setdefault("sim_speed_multiplier", 1.0)
+    _s.setdefault("sim_days_total", 0)
+    _s.setdefault("sim_start_date", "")
 
 
 STORE_TEMPLATES = {
@@ -158,6 +189,17 @@ STORE_TEMPLATES = {
                         "archetype_dist": {"rockstar": 1, "solid_mid": 4, "underperformer": 1, "new_hire": 0}},
 }
 
+# Speed presets shared between stores (form) and simulation (thread logic).
+# multiplier = simulated seconds per real second.
+SPEED_PRESETS: dict[str, dict] = {
+    "realtime":         {"label": "Realtime (1×)",               "multiplier": 1.0},
+    "1day_per_minute":  {"label": "1 day per minute (1,440×)",   "multiplier": 1440.0},
+    "1week_per_hour":   {"label": "1 week per hour (168×)",      "multiplier": 168.0},
+    "1month_per_hour":  {"label": "1 month per hour (720×)",     "multiplier": 720.0},
+    "1month_per_10min": {"label": "1 month per 10 min (4,320×)", "multiplier": 4320.0},
+    "custom":           {"label": "Custom multiplier",           "multiplier": None},
+}
+
 _FORM_CONTEXT = dict(
     lead_sources=["internet", "phone", "showroom", "referral", "service", "walkin"],
     deal_statuses=["lead", "qualified", "proposal", "negotiation", "closed_won", "closed_lost"],
@@ -171,6 +213,7 @@ _FORM_CONTEXT = dict(
     scenario_keys=["slow_industry_month", "manager_on_vacation", "bdc_underperforming",
                    "inventory_shortage", "strong_incentive_month", "high_heat_weekend"],
     month_shapes=["flat", "realistic", "front_loaded"],
+    speed_presets=SPEED_PRESETS,
 )
 
 
@@ -270,6 +313,7 @@ def store_detail(store_id: str):
         service_key_configured=service_key_configured,
         toprep_url_configured=toprep_url_configured,
         toprep_app_url=toprep_app_url,
+        speed_presets=SPEED_PRESETS,
     )
 
 
