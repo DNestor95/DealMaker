@@ -8,6 +8,11 @@ async function simAction(storeId, action) {
     const resp = await fetch(`/simulation/${storeId}/${action}`, { method: 'POST' });
     const data = await resp.json();
 
+    if (!resp.ok && data.error) {
+      alert('Error: ' + data.error + (data.hint ? '\n\n' + data.hint : ''));
+      return;
+    }
+
     // Update the status badge and action buttons in the list view (if present)
     const statusEl = document.querySelector(`[id="status-${storeId}"]`);
     if (statusEl) {

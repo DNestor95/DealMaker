@@ -25,7 +25,7 @@ _APP_ROOT = Path(__file__).parent.parent.parent
 
 # Import core generation helpers from v1 generator (still valid in v2)
 sys.path.insert(0, str(_APP_ROOT))
-from dealmaker_generator import build_team, generate_events, normalize_delivery_url, send_events_to_api
+from dealmaker_generator import AUTH_ERROR_401, build_team, generate_events, normalize_delivery_url, send_events_to_api
 
 bp = Blueprint("simulation", __name__, url_prefix="/simulation")
 
@@ -143,6 +143,10 @@ class _StoreThread(threading.Thread):
                     result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
                     if result["failed"] > 0 and result["errors"]:
                         self.last_error = str(result["errors"][0])[:140]
+                        # Stop the thread on authentication failure to avoid
+                        # burning through retries with a token that won't work.
+                        if self.last_error.startswith(AUTH_ERROR_401):
+                            self._stop_event.set()
                     else:
                         self.last_error = None
                 else:
@@ -172,6 +176,14 @@ def start(store_id: str):
 
     if store_id in _runners and _runners[store_id].is_alive():
         return jsonify({"status": "already_running"})
+
+    # Pre-flight auth check when events are delivered to the API.
+    if store.get("delivery") in {"api", "both"}:
+        if not os.getenv("TOPREP_AUTH_TOKEN", "").strip():
+            return jsonify({
+                "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
+                "hint": "Set TOPREP_AUTH_TOKEN in Settings before starting an API-delivery simulation.",
+            }), 401
 
     thread = _StoreThread(store)
     _runners[store_id] = thread

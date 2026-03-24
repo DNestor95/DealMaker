@@ -17,6 +17,8 @@ from typing import Any
 from urllib import error, request
 
 
+AUTH_ERROR_401 = "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN."
+
 STATUS_VALUES = ["lead", "qualified", "proposal", "negotiation", "closed_won", "closed_lost"]
 ACTIVITY_TYPES = ["call", "email", "meeting", "demo", "note"]
 ACTIVITY_OUTCOMES = [
@@ -761,6 +763,8 @@ def post_event_to_api(
             status_ok = HTTPStatus.OK <= response.status < HTTPStatus.MULTIPLE_CHOICES
             return status_ok, f"status={response.status}"
     except error.HTTPError as exc:
+        if exc.code == 401:
+            return False, AUTH_ERROR_401
         detail = exc.read().decode("utf-8", errors="replace")
         return False, f"http_error={exc.code} body={detail}"
     except error.URLError as exc:
@@ -883,6 +887,8 @@ def post_actions_batch_to_edge(
             status_ok = HTTPStatus.OK <= response.status < HTTPStatus.MULTIPLE_CHOICES
             return status_ok, f"status={response.status}", inserted
     except error.HTTPError as exc:
+        if exc.code == 401:
+            return False, AUTH_ERROR_401, 0
         detail = exc.read().decode("utf-8", errors="replace")
         return False, f"http_error={exc.code} body={detail}", 0
     except error.URLError as exc:
