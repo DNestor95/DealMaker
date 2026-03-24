@@ -43,6 +43,11 @@ _STORES_FILE = _APP_ROOT / "output" / "stores_config.json"
 # Ensure dealmaker_generator is importable without repeated path manipulation.
 if str(_APP_ROOT) not in sys.path:
     sys.path.insert(0, str(_APP_ROOT))
+# On Vercel the project filesystem is read-only; only /tmp is writable.
+if os.environ.get("VERCEL"):
+    _STORES_FILE = Path("/tmp/stores_config.json")
+else:
+    _STORES_FILE = Path(__file__).parent.parent.parent / "output" / "stores_config.json"
 
 
 def _load_stores() -> dict[str, dict]:
