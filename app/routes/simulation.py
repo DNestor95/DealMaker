@@ -18,6 +18,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, render_template
 
+from dealmaker_postgres import database_url_from_env, is_postgres_dsn
 from app.routes.stores import _OUTPUT_DIR, _stores, _parse_hire_dates
 
 # Absolute path to the project root so output/ is always found regardless of CWD.
@@ -136,7 +137,7 @@ class _StoreThread(threading.Thread):
                         fh.write(json.dumps(ev.to_dict(), separators=(",", ":")) + "\n")
 
             if s["delivery"] in {"api", "both"}:
-                api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", ""))
+                api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", "") or database_url_from_env())
                 auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
                 supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "")
                 if api_url:
@@ -150,7 +151,7 @@ class _StoreThread(threading.Thread):
                     else:
                         self.last_error = None
                 else:
-                    self.last_error = "TOPREP_API_URL not configured"
+                    self.last_error = "TOPREP_API_URL or DATABASE_URL not configured"
 
             self.events_sent += len(events)
             self.last_batch_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -179,7 +180,8 @@ def start(store_id: str):
 
     # Pre-flight auth check when events are delivered to the API.
     if store.get("delivery") in {"api", "both"}:
-        if not os.getenv("TOPREP_AUTH_TOKEN", "").strip():
+        api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", "") or database_url_from_env())
+        if not is_postgres_dsn(api_url) and not os.getenv("TOPREP_AUTH_TOKEN", "").strip():
             return jsonify({
                 "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
                 "hint": "Set TOPREP_AUTH_TOKEN in Settings before starting an API-delivery simulation.",

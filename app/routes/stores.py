@@ -23,6 +23,7 @@ from pathlib import Path
 
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 
+from dealmaker_postgres import database_url_from_env, is_postgres_dsn
 from app.supabase_client import (
     deprovision_store_reps,
     get_profiles,
@@ -493,10 +494,10 @@ def backfill_store(store_id: str):
 
     errors_count = 0
     if delivery in {"api", "both"}:
-        api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", ""))
+        api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", "") or database_url_from_env())
         auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
         supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "")
-        if not auth_token.strip():
+        if not is_postgres_dsn(api_url) and not auth_token.strip():
             return jsonify({
                 "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
                 "hint": "Set TOPREP_AUTH_TOKEN in Settings before running an API-delivery backfill.",

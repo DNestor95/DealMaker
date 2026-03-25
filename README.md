@@ -258,3 +258,19 @@ Required `.env` values for this mode:
 - `TOPREP_API_URL=https://<project-ref>.functions.supabase.co/<function-name>`
 - `TOPREP_AUTH_TOKEN=<user-jwt>`
 - `SUPABASE_ANON_KEY=<sb_publishable_...>`
+
+### Direct Postgres mode
+
+If you want to bypass HTTP delivery entirely, DealMaker can insert directly into
+the `events` table over Postgres.
+
+Required `.env` values for this mode:
+
+- `DATABASE_URL=postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres`
+
+Notes:
+
+- `TOPREP_AUTH_TOKEN` is not required for direct Postgres delivery.
+- `TOPREP_API_URL` can be left unset when `DATABASE_URL` is configured.
+- The app inserts the same `sales_rep_id`, `type`, `payload`, and `created_at`
+  envelope used by the existing HTTP delivery path.

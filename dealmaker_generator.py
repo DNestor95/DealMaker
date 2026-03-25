@@ -7,6 +7,7 @@ import json
 import os
 import random
 import re
+import ssl
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -15,6 +16,17 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+
+from dealmaker_postgres import database_url_from_env, insert_events, is_postgres_dsn
+
+
+def _ssl_ctx() -> ssl.SSLContext:
+    """SSL context that trusts certifi's CA bundle when available (fixes macOS urllib)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
 
 
 AUTH_ERROR_401 = "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN."
@@ -299,7 +311,7 @@ def fetch_profiles_from_supabase(
         headers["apikey"] = supabase_apikey
     req = request.Request(url, headers=headers, method="GET")
     try:
-        with request.urlopen(req, timeout=10) as response:
+        with request.urlopen(req, timeout=10, context=_ssl_ctx()) as response:
             return json.loads(response.read().decode("utf-8"))
     except Exception:
         return []
@@ -759,7 +771,7 @@ def post_event_to_api(
 
     req = request.Request(api_url, data=payload, headers=headers, method="POST")
     try:
-        with request.urlopen(req, timeout=timeout_seconds) as response:
+        with request.urlopen(req, timeout=timeout_seconds, context=_ssl_ctx()) as response:
             status_ok = HTTPStatus.OK <= response.status < HTTPStatus.MULTIPLE_CHOICES
             return status_ok, f"status={response.status}"
     except error.HTTPError as exc:
@@ -874,7 +886,7 @@ def post_actions_batch_to_edge(
 
     req = request.Request(api_url, data=payload, headers=headers, method="POST")
     try:
-        with request.urlopen(req, timeout=timeout_seconds) as response:
+        with request.urlopen(req, timeout=timeout_seconds, context=_ssl_ctx()) as response:
             response_text = response.read().decode("utf-8", errors="replace")
             inserted = len(events)
             if response_text:
@@ -903,6 +915,10 @@ def send_events_to_api(
     timeout_seconds: int = 15,
     max_retries: int = 3,
 ) -> dict[str, Any]:
+    if is_postgres_dsn(api_url):
+        inserted, errors = insert_events(api_url, [event.to_dict() for event in events])
+        return {"sent": inserted, "failed": max(0, len(events) - inserted), "errors": errors[:10]}
+
     if "/functions/v1/" in api_url:
         delivered = False
         last_error = ""
@@ -1054,10 +1070,12 @@ def validate_events(events: list[Event]) -> dict[str, Any]:
 def validate_api_settings(api_url: str, auth_token: str, supabase_apikey: str = "") -> None:
     if not api_url:
         raise ValueError("API URL is required for API delivery")
+    if is_postgres_dsn(api_url):
+        return
     if not (api_url.startswith("http://") or api_url.startswith("https://")):
-        raise ValueError("API URL must start with http:// or https://")
+        raise ValueError("API URL must start with http://, https://, or use a postgres:// DSN")
     if "/api/events" not in api_url and "/rest/v1/" not in api_url and "/functions/v1/" not in api_url and ".supabase.co" not in api_url:
-        raise ValueError("API URL must be TOP REP /api/events, Supabase /rest/v1/*, or Supabase /functions/v1/*")
+        raise ValueError("API URL must be TOP REP /api/events, Supabase /rest/v1/*, Supabase /functions/v1/*, or a postgres:// DSN")
 
     if not auth_token:
         raise ValueError("Auth token is required for API delivery")
@@ -1074,6 +1092,8 @@ def validate_api_settings(api_url: str, auth_token: str, supabase_apikey: str = 
 def normalize_delivery_url(api_url: str) -> str:
     trimmed = api_url.strip().rstrip("/")
     if not trimmed:
+        return trimmed
+    if is_postgres_dsn(trimmed):
         return trimmed
     if "/api/events" in trimmed or "/rest/v1/" in trimmed or "/functions/v1/" in trimmed:
         return trimmed
@@ -1102,8 +1122,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-url",
-        default=os.getenv("TOPREP_API_URL", ""),
-        help="TOP REP ingest endpoint, e.g. https://<domain>/api/events",
+        default=os.getenv("TOPREP_API_URL", "") or database_url_from_env(),
+        help="TOP REP ingest endpoint or postgres:// connection string",
     )
     parser.add_argument(
         "--auth-token",
@@ -1113,7 +1133,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--supabase-apikey",
         default=os.getenv("SUPABASE_ANON_KEY", ""),
-        help="Supabase anon/publishable key (required for direct Supabase REST writes)",
+        help="Supabase anon/publishable key (required for direct Supabase REST writes only)",
     )
     parser.add_argument(
         "--sales-rep-id",
@@ -1163,7 +1183,7 @@ def main() -> None:
     raw_ids = getattr(args, "sales_rep_ids", "").strip()
     if raw_ids:
         sales_rep_ids = [r.strip() for r in raw_ids.split(",") if r.strip()]
-    elif args.delivery in {"api", "both"}:
+    elif args.delivery in {"api", "both"} and not is_postgres_dsn(args.api_url or ""):
         api_url_base = (args.api_url or "").rstrip("/").split("/functions/")[0].split("/rest/")[0]
         profiles = fetch_profiles_from_supabase(api_url_base, auth_token_for_identity, supabase_apikey)
         sales_rep_ids = [p["id"] for p in profiles if isinstance(p, dict) and p.get("id")]

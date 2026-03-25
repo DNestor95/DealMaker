@@ -8,10 +8,20 @@ import json
 import os
 import re
 import secrets
+import ssl
 import string
 from http import HTTPStatus
 from pathlib import Path
 from urllib import error, request
+
+
+def _ssl_ctx() -> ssl.SSLContext:
+    """SSL context that trusts certifi's CA bundle when available (fixes macOS urllib)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
 
 
 def _load_env() -> None:
@@ -108,7 +118,7 @@ def check_connection() -> dict:
     url = f"{base}/rest/v1/"
     try:
         req = request.Request(url, headers=_headers(), method="GET")
-        with request.urlopen(req, timeout=10) as resp:
+        with request.urlopen(req, timeout=10, context=_ssl_ctx()) as resp:
             return {"ok": True, "message": f"Connected to Supabase (HTTP {resp.status})."}
     except error.HTTPError as exc:
         if exc.code == 401:
@@ -133,7 +143,7 @@ def rest_get(path: str, params: dict | None = None) -> list[dict]:
         url = f"{url}?{qs}"
     try:
         req = request.Request(url, headers=_headers(), method="GET")
-        with request.urlopen(req, timeout=10) as resp:
+        with request.urlopen(req, timeout=10, context=_ssl_ctx()) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception:
         return []
@@ -148,7 +158,7 @@ def rest_post(path: str, body: dict) -> dict:
     data = json.dumps(body).encode("utf-8")
     try:
         req = request.Request(url, data=data, headers=_headers(), method="POST")
-        with request.urlopen(req, timeout=10) as resp:
+        with request.urlopen(req, timeout=10, context=_ssl_ctx()) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except error.HTTPError as exc:
@@ -193,7 +203,7 @@ def post_event(event: dict) -> dict:
     data = json.dumps(event).encode("utf-8")
     req = request.Request(url, data=data, headers=_headers(), method="POST")
     try:
-        with request.urlopen(req, timeout=10) as resp:
+        with request.urlopen(req, timeout=10, context=_ssl_ctx()) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except error.HTTPError as exc:
@@ -239,7 +249,7 @@ def seed_source_stage_priors(
     headers = {**_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"}
     try:
         req = request.Request(url, data=data, headers=headers, method="POST")
-        with request.urlopen(req, timeout=10) as resp:
+        with request.urlopen(req, timeout=10, context=_ssl_ctx()) as resp:
             raw = resp.read().decode("utf-8")
             return {"ok": True, "rows": len(rows), "response": raw}
     except error.HTTPError as exc:
@@ -314,7 +324,7 @@ def admin_create_user(email: str, password: str) -> dict:
     data = json.dumps(body).encode("utf-8")
     req = request.Request(url, data=data, headers=_service_headers(), method="POST")
     try:
-        with request.urlopen(req, timeout=15) as resp:
+        with request.urlopen(req, timeout=15, context=_ssl_ctx()) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except error.HTTPError as exc:
@@ -406,7 +416,7 @@ def rest_post_with_headers(path: str, body: dict, headers: dict) -> dict:
     data = json.dumps(body).encode("utf-8")
     try:
         req = request.Request(url, data=data, headers=headers, method="POST")
-        with request.urlopen(req, timeout=10) as resp:
+        with request.urlopen(req, timeout=10, context=_ssl_ctx()) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except error.HTTPError as exc:
@@ -428,7 +438,7 @@ def deprovision_store_reps(store_id: str) -> dict:
     list_url = f"{_base_url()}/auth/v1/admin/users?per_page=1000"
     req = request.Request(list_url, headers=_service_headers(), method="GET")
     try:
-        with request.urlopen(req, timeout=15) as resp:
+        with request.urlopen(req, timeout=15, context=_ssl_ctx()) as resp:
             raw = resp.read().decode("utf-8")
             payload = json.loads(raw) if raw else {}
     except Exception as exc:
@@ -447,7 +457,7 @@ def deprovision_store_reps(store_id: str) -> dict:
             del_url = f"{_base_url()}/auth/v1/admin/users/{uid}"
             del_req = request.Request(del_url, headers=_service_headers(), method="DELETE")
             try:
-                with request.urlopen(del_req, timeout=15):
+                with request.urlopen(del_req, timeout=15, context=_ssl_ctx()):
                     deleted += 1
             except Exception as exc:
                 errors.append(f"{email}: {exc}")

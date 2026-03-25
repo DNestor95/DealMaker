@@ -15,6 +15,7 @@ from pathlib import Path
 
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 
+from dealmaker_postgres import check_database_connection, database_url_from_env
 from app.supabase_client import _TOPREP_SUPABASE_URL
 
 bp = Blueprint("settings", __name__, url_prefix="/settings")
@@ -24,6 +25,7 @@ bp = Blueprint("settings", __name__, url_prefix="/settings")
 # target and the publishable key is baked into the application.
 ENV_KEYS = [
     ("TOPREP_AUTH_TOKEN", "Auth Token (JWT)", True),
+    ("DATABASE_URL", "Postgres Connection URL", True),
     ("SUPABASE_SERVICE_ROLE_KEY", "Supabase Service Role Key (Admin Auth)", True),
     ("TOPREP_APP_URL", "TopRep App URL (for QA login links)", False),
 ]
@@ -86,7 +88,10 @@ def save_settings():
 
 @bp.route("/test-connection", methods=["POST"])
 def test_connection():
-    """Test the live Supabase REST API connection and return JSON."""
+    """Test the configured direct Postgres or Supabase REST connection and return JSON."""
+    if database_url_from_env().strip():
+        return jsonify(check_database_connection())
+
     from app.supabase_client import check_connection  # local import avoids circular dep
 
     result = check_connection()
