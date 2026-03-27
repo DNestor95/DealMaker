@@ -285,7 +285,32 @@ def create_store():
         )
         seed_source_stage_priors(store_id, prior_rows)
 
-    return redirect(url_for("stores.store_detail", store_id=store_id))
+    # Auto-provision QA auth users when service key is available
+    anchor = ""
+    if os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+        credentials = provision_store_reps(store)
+        store["credentials"] = credentials
+        _save_stores(_stores)
+        success_count = sum(1 for c in credentials if not c.get("error"))
+        anchor = "#provisioning"
+        if success_count:
+            flash(
+                f"✓ Store '{store_id}' created and {success_count} rep login(s) provisioned. "
+                "Scroll down to see credentials.",
+                "success",
+            )
+        else:
+            flash(
+                f"Store '{store_id}' created. Rep provisioning ran but encountered errors — check credentials below.",
+                "warning",
+            )
+    else:
+        flash(
+            f"Store '{store_id}' created. Add SUPABASE_SERVICE_ROLE_KEY in Settings to provision rep logins.",
+            "info",
+        )
+
+    return redirect(url_for("stores.store_detail", store_id=store_id) + anchor)
 
 
 @bp.route("/stores/<store_id>/edit", methods=["GET"])

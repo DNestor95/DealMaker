@@ -96,3 +96,70 @@ def test_connection():
 
     result = check_connection()
     return jsonify(result)
+
+
+@bp.route("/fetch-token", methods=["POST"])
+def fetch_token():
+    """Sign in to Supabase with email + password and save the resulting JWT as TOPREP_AUTH_TOKEN.
+
+    The credentials are used server-side only and are never stored or logged.
+    """
+    email = request.form.get("email", "").strip()
+    password = request.form.get("password", "")
+
+    if not email or not password:
+        return jsonify({"ok": False, "error": "Email and password are required."}), 400
+
+    import json
+    import ssl
+    from urllib import error as url_error, request as url_request
+
+    from app.supabase_client import _TOPREP_SUPABASE_URL, _anon_key, _ssl_ctx
+
+    auth_url = f"{_TOPREP_SUPABASE_URL}/auth/v1/token?grant_type=password"
+    body = json.dumps({"email": email, "password": password}).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "apikey": _anon_key(),
+    }
+    req = url_request.Request(auth_url, data=body, headers=headers, method="POST")
+    try:
+        with url_request.urlopen(req, timeout=15, context=_ssl_ctx()) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except url_error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="replace")[:300]
+        return jsonify({"ok": False, "error": f"HTTP {exc.code}: {body_text}"}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    token = payload.get("access_token")
+    if not token:
+        return jsonify({"ok": False, "error": "No access_token in response. Check your credentials."}), 400
+
+    # Persist to environment and .env file
+    os.environ["TOPREP_AUTH_TOKEN"] = token
+
+    if os.environ.get("VERCEL"):
+        env_path = Path("/tmp/.env")
+    else:
+        env_path = Path(__file__).parent.parent.parent / ".env"
+
+    existing: dict[str, str] = {}
+    if env_path.exists():
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            existing[k.strip()] = v.strip().strip('"').strip("'")
+
+    existing["TOPREP_AUTH_TOKEN"] = token
+    lines = [f'{k}="{v}"' for k, v in existing.items()]
+    try:
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        pass  # Session-only; already set in os.environ
+
+    # Return just a prefix so the token isn't fully exposed in the JSON response
+    return jsonify({"ok": True, "token_prefix": token[:20] + "..."})

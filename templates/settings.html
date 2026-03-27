@@ -29,9 +29,41 @@
 </div>
 {% endif %}
 
+<!-- ── Get Auth Token ─────────────────────────────────────────────────── -->
+{% set auth_field = fields | selectattr('key', 'equalto', 'TOPREP_AUTH_TOKEN') | first %}
+<div class="form-card">
+  <section class="form-section">
+    <h2>
+      Step 1 — Get Auth Token
+      {% if auth_field and auth_field.configured %}
+        <span class="badge badge--running" style="font-size:.75em;vertical-align:middle">✓ Token set</span>
+      {% else %}
+        <span class="badge badge--stopped" style="font-size:.75em;vertical-align:middle">Required</span>
+      {% endif %}
+    </h2>
+    <p class="hint">Sign in with your TopRep account to fetch and save your auth token automatically. Your password is sent directly to Supabase and is never stored by DealMaker.</p>
+    <div class="form-row-group">
+      <div class="form-row">
+        <label for="login-email">TopRep Email</label>
+        <input id="login-email" type="email" placeholder="you@example.com" autocomplete="username" />
+      </div>
+      <div class="form-row">
+        <label for="login-password">Password</label>
+        <input id="login-password" type="password" placeholder="••••••••" autocomplete="current-password" />
+      </div>
+    </div>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn btn--primary" type="button" id="btn-fetch-token" onclick="fetchToken()">
+        🔑 Sign In &amp; Save Token
+      </button>
+    </div>
+    <div id="fetch-token-result" style="display:none;margin-top:12px"></div>
+  </section>
+</div>
+
 <form method="POST" action="{{ url_for('settings.save_settings') }}" class="form-card">
   <section class="form-section">
-    <h2>Credentials</h2>
+    <h2>Step 2 — Additional Credentials</h2>
     {% for field in fields %}
     <div class="form-row">
       <label for="{{ field.key }}">
@@ -54,4 +86,49 @@
 </form>
 
 <div id="conn-result" style="display:none;margin-top:12px"></div>
+
+<script>
+async function fetchToken() {
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const btn = document.getElementById('btn-fetch-token');
+  const result = document.getElementById('fetch-token-result');
+
+  if (!email || !password) {
+    result.className = 'alert alert--error';
+    result.textContent = 'Email and password are required.';
+    result.style.display = '';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Signing in…';
+  result.style.display = 'none';
+
+  const fd = new FormData();
+  fd.append('email', email);
+  fd.append('password', password);
+
+  try {
+    const resp = await fetch('{{ url_for("settings.fetch_token") }}', { method: 'POST', body: fd });
+    const data = await resp.json();
+    if (data.ok) {
+      result.className = 'alert alert--success';
+      result.textContent = '✓ Token saved (' + data.token_prefix + '). Connection is ready.';
+      // Reload after a short delay so the "Configured" badge updates
+      setTimeout(() => window.location.reload(), 1500);
+    } else {
+      result.className = 'alert alert--error';
+      result.textContent = '✗ ' + data.error;
+    }
+  } catch (err) {
+    result.className = 'alert alert--error';
+    result.textContent = '✗ Request failed: ' + err;
+  } finally {
+    result.style.display = '';
+    btn.disabled = false;
+    btn.textContent = '🔑 Sign In & Save Token';
+  }
+}
+</script>
 {% endblock %}
