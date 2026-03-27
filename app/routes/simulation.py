@@ -211,6 +211,20 @@ class _StoreThread(threading.Thread):
 
 @bp.route("/<store_id>/start", methods=["POST"])
 def start(store_id: str):
+    # Vercel (and other serverless runtimes) do not support persistent background
+    # threads — each request runs in an isolated, short-lived function instance.
+    # Return a clear error instead of silently starting a thread that will die
+    # as soon as the HTTP response is sent.
+    if os.environ.get("VERCEL"):
+        return jsonify({
+            "error": "Live simulation is not available on Vercel.",
+            "hint": (
+                "Vercel is a serverless platform: background threads cannot persist "
+                "between requests.  Use the Backfill feature to generate historical "
+                "data, or run DealMaker locally / on Railway for live simulation."
+            ),
+        }), 503
+
     store = _stores.get(store_id)
     if not store:
         return jsonify({"error": "Store not found"}), 404

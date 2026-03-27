@@ -274,3 +274,47 @@ Notes:
 - `TOPREP_API_URL` can be left unset when `DATABASE_URL` is configured.
 - The app inserts the same `sales_rep_id`, `type`, `payload`, and `created_at`
   envelope used by the existing HTTP delivery path.
+
+## Vercel deployment
+
+DealMaker can be deployed to [Vercel](https://vercel.com) so you can manage
+testing from anywhere without running a local server.
+
+### One-click deploy
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/DNestor95/DealMaker)
+
+### Manual steps
+
+1. **Push this repo** to GitHub (or fork it).
+2. **Import the project** in the Vercel dashboard → *Add New → Project*.
+3. **Set environment variables** in *Project Settings → Environment Variables*:
+
+   | Variable | Required | Description |
+   |---|---|---|
+   | `FLASK_SECRET_KEY` | ✅ | Random hex string for signing sessions (see below) |
+   | `TOPREP_AUTH_TOKEN` | For API delivery | Your TopRep user JWT |
+   | `SUPABASE_SERVICE_ROLE_KEY` | For rep provisioning | Supabase Admin key (never exposed to the browser) |
+   | `TOPREP_APP_URL` | Optional | Your deployed TopRep app URL |
+   | `DATABASE_URL` | For direct Postgres | Postgres connection string |
+
+   Generate a secret key:
+
+   ```bash
+   python -c "import secrets; print(secrets.token_hex(32))"
+   ```
+
+4. **Deploy** — Vercel detects `vercel.json` and uses `@vercel/python`.
+
+### Notes on Vercel limitations
+
+- **Live simulation is not supported** on Vercel because serverless functions
+  cannot run persistent background threads.  Use the **Backfill** feature to
+  generate historical data instead, or run DealMaker locally / on
+  [Railway](https://railway.app) for real-time simulation.
+- Settings saved via the UI are written to `/tmp/.env` on Vercel; they persist
+  only for the lifetime of that function instance.  Set credentials as Vercel
+  environment variables for durable configuration.
+- Static assets (`/static/…`) are served directly from Vercel's CDN — no
+  extra configuration needed.
+
