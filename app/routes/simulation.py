@@ -19,7 +19,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, render_template
 
 from dealmaker_postgres import database_url_from_env, is_postgres_dsn
-from app.routes.stores import _OUTPUT_DIR, _stores, _parse_hire_dates
+from app.routes.stores import SPEED_PRESETS, _OUTPUT_DIR, _stores, _parse_hire_dates
 
 # Absolute path to the project root so output/ is always found regardless of CWD.
 _APP_ROOT = Path(__file__).parent.parent.parent
@@ -115,6 +115,13 @@ class _StoreThread(threading.Thread):
             archetype_dist=s.get("archetype_dist"),
             new_hire_dates=_parse_hire_dates(s),
         )
+        # Prefer provisioned profile IDs so events.sales_rep_id always points to
+        # existing profiles rows (avoids FK 23503 errors on /rest/v1/events).
+        explicit_rep_ids = [
+            c.get("user_id")
+            for c in s.get("credentials", [])
+            if isinstance(c, dict) and c.get("user_id") and not c.get("error")
+        ]
         batch = 0
 
         output_dir = _OUTPUT_DIR / "stores"
@@ -133,6 +140,7 @@ class _StoreThread(threading.Thread):
                 team=team,
                 dealership_id=s["dealership_id"],
                 seed=s["seed"] + batch,
+                sales_rep_ids=explicit_rep_ids or None,
                 base_close_rate=s.get("close_rate_pct", 36) / 100.0,
                 deal_amount_min=s.get("deal_amount_min", 12000),
                 deal_amount_max=s.get("deal_amount_max", 68000),
@@ -151,20 +159,34 @@ class _StoreThread(threading.Thread):
 
             if s["delivery"] in {"api", "both"}:
                 api_url = _resolve_api_url()
-                # Use the service role key when no user JWT is configured —
-                # it bypasses RLS so synthetic events for any rep UUID can be inserted.
-                auth_token = (
-                    os.getenv("TOPREP_AUTH_TOKEN", "").strip()
-                    or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-                )
+                # For direct Supabase REST writes (/rest/v1/events) we must use
+                # the service role key as the bearer token — it bypasses RLS so
+                # synthetic events for any rep UUID can be inserted without the
+                # caller's user-JWT restricting writes to only their own sub.
+                # For the TopRep Next.js /api/events route (contains /api/events
+                # or a non-Supabase domain), prefer the user JWT instead.
+                service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+                user_jwt = os.getenv("TOPREP_AUTH_TOKEN", "").strip()
+                is_rest_write = "/rest/v1/" in api_url
+                if is_rest_write and service_key:
+                    auth_token = service_key
+                else:
+                    auth_token = user_jwt or service_key
                 supabase_apikey = _resolve_anon_key()
                 if api_url:
-                    result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
+                    result = send_events_to_api(
+                        events,
+                        api_url,
+                        auth_token,
+                        supabase_apikey,
+                        timeout_seconds=8,
+                        max_retries=0,
+                    )
                     if result["failed"] > 0 and result["errors"]:
                         self.last_error = str(result["errors"][0])[:140]
                         # Stop the thread on authentication failure to avoid
                         # burning through retries with a token that won't work.
-                        if self.last_error.startswith(AUTH_ERROR_401):
+                        if self.last_error.startswith(AUTH_ERROR_401) or "23503" in self.last_error:
                             self._stop_event.set()
                     else:
                         self.last_error = None

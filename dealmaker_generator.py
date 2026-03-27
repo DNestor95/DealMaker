@@ -907,6 +907,37 @@ def post_actions_batch_to_edge(
         return False, f"url_error={exc.reason}", 0
 
 
+def post_events_batch_to_rest(
+    events: list[Event],
+    api_url: str,
+    auth_token: str,
+    supabase_apikey: str = "",
+    timeout_seconds: int = 15,
+) -> tuple[bool, str, int]:
+    payload = json.dumps([event.to_dict() for event in events], separators=(",", ":")).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_token}",
+        "Prefer": "return=minimal",
+    }
+    if supabase_apikey:
+        headers["apikey"] = supabase_apikey
+
+    req = request.Request(api_url, data=payload, headers=headers, method="POST")
+    try:
+        with request.urlopen(req, timeout=timeout_seconds, context=_ssl_ctx()) as response:
+            status_ok = HTTPStatus.OK <= response.status < HTTPStatus.MULTIPLE_CHOICES
+            return status_ok, f"status={response.status}", len(events)
+    except error.HTTPError as exc:
+        if exc.code == 401:
+            return False, AUTH_ERROR_401, 0
+        detail = exc.read().decode("utf-8", errors="replace")
+        return False, f"http_error={exc.code} body={detail}", 0
+    except error.URLError as exc:
+        return False, f"url_error={exc.reason}", 0
+
+
 def send_events_to_api(
     events: list[Event],
     api_url: str,
@@ -943,6 +974,32 @@ def send_events_to_api(
             return {"sent": inserted, "failed": max(0, len(events) - inserted), "errors": []}
         return {"sent": 0, "failed": len(events), "errors": [last_error]}
 
+    if "/rest/v1/" in api_url:
+        delivered = False
+        last_error = ""
+        inserted = 0
+        for attempt in range(max_retries + 1):
+            ok, detail, inserted_count = post_events_batch_to_rest(
+                events=events,
+                api_url=api_url,
+                auth_token=auth_token,
+                supabase_apikey=supabase_apikey,
+                timeout_seconds=timeout_seconds,
+            )
+            if ok:
+                delivered = True
+                inserted = inserted_count
+                break
+            last_error = detail
+            if last_error == AUTH_ERROR_401:
+                break
+            if attempt < max_retries:
+                time.sleep(0.5 * (2**attempt))
+
+        if delivered:
+            return {"sent": inserted, "failed": max(0, len(events) - inserted), "errors": []}
+        return {"sent": 0, "failed": len(events), "errors": [last_error]}
+
     sent = 0
     failed = 0
     errors: list[str] = []
@@ -963,6 +1020,10 @@ def send_events_to_api(
                 delivered = True
                 break
             last_error = detail
+            # 401 means credentials are wrong/expired; don't burn retries for
+            # this event or continue with the rest of the batch.
+            if last_error == AUTH_ERROR_401:
+                break
             if attempt < max_retries:
                 time.sleep(0.5 * (2**attempt))
 
@@ -970,6 +1031,11 @@ def send_events_to_api(
             failed += 1
             if len(errors) < 10:
                 errors.append(last_error)
+            # Stop the batch immediately on auth failures so callers can surface
+            # actionable errors without waiting through every event retry cycle.
+            if last_error == AUTH_ERROR_401:
+                failed += max(0, len(events) - sent - failed)
+                break
 
     return {"sent": sent, "failed": failed, "errors": errors}
 

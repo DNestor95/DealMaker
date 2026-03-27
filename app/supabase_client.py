@@ -65,13 +65,21 @@ def _anon_key() -> str:
     """Return the configured Supabase anon/publishable key.
 
     Checks ``SUPABASE_ANON_KEY`` first; falls back to
-    ``VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY`` and finally to the hard-coded
-    TopRep publishable key so the app is always ready to send data.
+    ``VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY``, then the hard-coded TopRep
+    publishable key, and finally the service role key.  Supabase's REST API
+    requires a JWT (``eyJ…``) in the ``apikey`` header, so any non-JWT
+    publishable key is discarded in favour of the service role JWT.
     """
-    return (
+    candidate = (
         os.getenv("SUPABASE_ANON_KEY")
-        or os.getenv("VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY", _TOPREP_PUBLISHABLE_KEY)
+        or os.getenv("PUBLIC_SUPABASE_ANON_KEY")
+        or os.getenv("VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY")
+        or _TOPREP_PUBLISHABLE_KEY
     )
+    # If the candidate isn't a JWT, fall back to the service role key which is.
+    if not candidate.startswith("eyJ"):
+        candidate = os.getenv("SUPABASE_SERVICE_ROLE_KEY", candidate)
+    return candidate
 
 
 def _base_url() -> str:
@@ -81,8 +89,15 @@ def _base_url() -> str:
 
 
 def _headers() -> dict[str, str]:
-    token = os.getenv("TOPREP_AUTH_TOKEN", "")
+    # Prefer user JWT when available; fall back to service role for server-side
+    # connectivity checks and background simulation writes.
+    user_token = os.getenv("TOPREP_AUTH_TOKEN", "")
+    service_token = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    token = user_token or service_token
     apikey = _anon_key()
+    # If we're using service-role fallback, the apikey should also be service_role.
+    if token and token == service_token and not user_token:
+        apikey = token
     h: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -121,12 +136,18 @@ def check_connection() -> dict:
         with request.urlopen(req, timeout=10, context=_ssl_ctx()) as resp:
             return {"ok": True, "message": f"Connected to Supabase (HTTP {resp.status})."}
     except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:300]
         if exc.code == 401:
+            has_service_key = bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip())
+            if has_service_key:
+                return {
+                    "ok": False,
+                    "error": f"Authentication failed (HTTP 401) — service role key appears invalid or expired. Detail: {body}",
+                }
             return {
                 "ok": False,
-                "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
+                "error": f"Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN. Detail: {body}",
             }
-        body = exc.read().decode("utf-8", errors="replace")[:300]
         return {"ok": False, "error": f"HTTP {exc.code}: {body}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
