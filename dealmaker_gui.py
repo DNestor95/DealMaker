@@ -22,6 +22,11 @@ from dealmaker_generator import (
     send_events_to_api,
     validate_api_settings,
 )
+from app.supabase_client import (
+    _anon_key as _supabase_anon_key,
+    _api_url as _supabase_api_url,
+    provision_store_reps,
+)
 
 
 @dataclass
@@ -137,6 +142,7 @@ class DealMakerGUI:
         self.root.geometry("980x620")
 
         self.runners: dict[str, StoreRunner] = {}
+        self.store_credentials: dict[str, list[dict]] = {}
 
         self.dealership_id_var = StringVar(value="DLR-001")
         self.salespeople_var = StringVar(value="8")
@@ -156,6 +162,60 @@ class DealMakerGUI:
         self._build_ui()
         self._refresh_loop()
 
+    @staticmethod
+    def _credentials_file_path(store_id: str) -> Path:
+        return Path("output/stores") / f"{store_id}.credentials.json"
+
+    def _save_store_credentials(self, store_id: str, credentials: list[dict]) -> None:
+        path = self._credentials_file_path(store_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "store_id": store_id,
+            "saved_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "credentials": credentials,
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _load_store_credentials(self, store_id: str) -> list[dict]:
+        path = self._credentials_file_path(store_id)
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        rows = payload.get("credentials", []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
+    @staticmethod
+    def _resolve_api_url(raw_api_url: str) -> str:
+        """Resolve delivery URL with the same fallback behavior as Flask routes."""
+        fallback_url = raw_api_url.strip() or os.getenv("TOPREP_API_URL", "").strip() or _supabase_api_url()
+        return normalize_delivery_url(fallback_url)
+
+    @staticmethod
+    def _resolve_api_keys(raw_auth_token: str, raw_supabase_apikey: str) -> tuple[str, str]:
+        """Resolve auth/apikey values for Supabase delivery.
+
+        Prefers explicit GUI values, then env vars, and finally project defaults.
+        If no user JWT is configured, falls back to SUPABASE_SERVICE_ROLE_KEY so
+        synthetic multi-rep event inserts can pass RLS.
+        """
+        auth_token = (
+            raw_auth_token.strip()
+            or os.getenv("TOPREP_AUTH_TOKEN", "").strip()
+            or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        )
+        supabase_apikey = (
+            raw_supabase_apikey.strip()
+            or os.getenv("SUPABASE_ANON_KEY", "").strip()
+            or _supabase_anon_key()
+            or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        )
+        return auth_token, supabase_apikey
+
     def _build_ui(self) -> None:
         frame = ttk.Frame(self.root, padding=12)
         frame.pack(fill="both", expand=True)
@@ -168,6 +228,7 @@ class DealMakerGUI:
         ttk.Button(button_row, text="Add + Start Store", command=self.open_add_store_dialog).pack(side="left")
         ttk.Button(button_row, text="Stop Selected", command=self.stop_selected).pack(side="left", padx=8)
         ttk.Button(button_row, text="Start Selected", command=self.start_selected).pack(side="left", padx=8)
+        ttk.Button(button_row, text="View Credentials", command=self.show_selected_credentials).pack(side="left", padx=8)
         ttk.Button(button_row, text="Remove Selected", command=self.remove_selected).pack(side="left", padx=8)
         ttk.Button(button_row, text="Stop All", command=self.stop_all).pack(side="left", padx=8)
 
@@ -276,9 +337,8 @@ class DealMakerGUI:
         if delivery_value not in {"file", "api", "both"}:
             raise ValueError("Delivery must be file, api, or both")
 
-        api_url_value = normalize_delivery_url(api_url)
-        auth_token_value = auth_token.strip() or os.getenv("TOPREP_AUTH_TOKEN", "")
-        supabase_apikey_value = supabase_apikey.strip() or os.getenv("SUPABASE_ANON_KEY", "")
+        api_url_value = self._resolve_api_url(api_url)
+        auth_token_value, supabase_apikey_value = self._resolve_api_keys(auth_token, supabase_apikey)
 
         # Parse comma-separated rep IDs; empty = auto-fetch from Supabase at runtime
         raw_ids = sales_rep_ids.strip() or os.getenv("TOPREP_SALES_REP_IDS", "")
@@ -310,6 +370,19 @@ class DealMakerGUI:
             sales_rep_ids=rep_ids_list,
             output_file=output_file,
         )
+
+    def _auto_provision_store_reps(self, config: StoreConfig) -> list[dict]:
+        """Provision test users for desktop-created stores when service role is available."""
+        if not os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip():
+            return []
+
+        store_config = {
+            "dealership_id": config.dealership_id,
+            "salespeople": config.salespeople,
+            # Desktop GUI doesn't expose archetype inputs; default all reps to solid_mid.
+            "archetype_dist": {"solid_mid": config.salespeople},
+        }
+        return provision_store_reps(store_config)
 
     def open_add_store_dialog(self) -> None:
         dialog = Toplevel(self.root)
@@ -434,10 +507,147 @@ class DealMakerGUI:
             messagebox.showerror("Duplicate store", f"Store '{config.dealership_id}' already exists.")
             return
 
+        credentials: list[dict] = []
+        disk_credentials = self._load_store_credentials(config.dealership_id)
+        try:
+            credentials = self._auto_provision_store_reps(config)
+        except Exception as err:
+            messagebox.showwarning(
+                "Provisioning warning",
+                f"Store added, but auto-provisioning failed: {err}",
+            )
+
         runner = StoreRunner(config)
         self.runners[config.dealership_id] = runner
         runner.start()
         self._refresh_table()
+
+        if credentials:
+            self.store_credentials[config.dealership_id] = credentials
+            self._save_store_credentials(config.dealership_id, credentials)
+            success_count = sum(1 for item in credentials if not item.get("error"))
+            error_count = len(credentials) - success_count
+            preview_lines = []
+            for item in credentials[:8]:
+                status = "OK" if not item.get("error") else f"ERR: {item.get('error', '')[:40]}"
+                preview_lines.append(
+                    f"{item.get('email', 'unknown')} / {item.get('password', 'unknown')} [{status}]"
+                )
+            if len(credentials) > 8:
+                preview_lines.append(f"... and {len(credentials) - 8} more")
+            messagebox.showinfo(
+                "Store Added + Provisioned",
+                (
+                    f"Store {config.dealership_id} added and started.\n\n"
+                    f"Provisioned logins: {success_count}\n"
+                    f"Provisioning errors: {error_count}\n\n"
+                    "Credentials preview:\n"
+                    + "\n".join(preview_lines)
+                ),
+            )
+        elif disk_credentials:
+            self.store_credentials[config.dealership_id] = disk_credentials
+            messagebox.showinfo(
+                "Store Added",
+                (
+                    f"Store {config.dealership_id} added and started.\n\n"
+                    f"Loaded {len(disk_credentials)} cached credential(s) from disk."
+                ),
+            )
+
+    def _credentials_to_text(self, store_id: str, credentials: list[dict]) -> str:
+        lines = [f"Store: {store_id}", "", "email,password,status,user_id"]
+        for item in credentials:
+            status = "ok" if not item.get("error") else f"error:{str(item.get('error', ''))}"
+            email = str(item.get("email", "")).replace(",", " ")
+            password = str(item.get("password", "")).replace(",", " ")
+            user_id = str(item.get("user_id", "")).replace(",", " ")
+            status = status.replace(",", " ")
+            lines.append(f"{email},{password},{status},{user_id}")
+        return "\n".join(lines)
+
+    def show_selected_credentials(self) -> None:
+        store_id = self._selected_store_id()
+        if not store_id:
+            messagebox.showinfo("No store selected", "Select a store row first.")
+            return
+
+        credentials = self.store_credentials.get(store_id, [])
+        if not credentials:
+            credentials = self._load_store_credentials(store_id)
+            if credentials:
+                self.store_credentials[store_id] = credentials
+        if not credentials:
+            messagebox.showinfo(
+                "No credentials",
+                (
+                    f"No cached credentials for {store_id}.\n\n"
+                    "Credentials are generated when auto-provisioning runs "
+                    "(requires SUPABASE_SERVICE_ROLE_KEY) and are saved under "
+                    "output/stores/*.credentials.json."
+                ),
+            )
+            return
+
+        dialog = Toplevel(self.root)
+        dialog.title(f"Credentials - {store_id}")
+        dialog.geometry("920x420")
+        dialog.transient(self.root)
+
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        columns = ("email", "password", "status", "user_id")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
+        tree.heading("email", text="Email")
+        tree.heading("password", text="Password")
+        tree.heading("status", text="Status")
+        tree.heading("user_id", text="User ID")
+        tree.column("email", width=280, anchor="w")
+        tree.column("password", width=120, anchor="w")
+        tree.column("status", width=220, anchor="w")
+        tree.column("user_id", width=280, anchor="w")
+
+        for item in credentials:
+            status = "OK" if not item.get("error") else f"ERR: {str(item.get('error', ''))[:100]}"
+            tree.insert(
+                "",
+                END,
+                values=(
+                    item.get("email", ""),
+                    item.get("password", ""),
+                    status,
+                    item.get("user_id", ""),
+                ),
+            )
+
+        tree.pack(fill="both", expand=True)
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill="x", pady=(10, 0))
+
+        def copy_all() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._credentials_to_text(store_id, credentials))
+            messagebox.showinfo("Copied", "All credentials copied to clipboard as CSV.")
+
+        def copy_selected_row() -> None:
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo("No row selected", "Select a credential row first.")
+                return
+            item = tree.item(selected[0])
+            values = item.get("values", [])
+            if len(values) < 4:
+                return
+            row = f"{values[0]},{values[1]},{values[2]},{values[3]}"
+            self.root.clipboard_clear()
+            self.root.clipboard_append(row)
+            messagebox.showinfo("Copied", "Selected credential row copied to clipboard.")
+
+        ttk.Button(button_row, text="Copy Selected", command=copy_selected_row).pack(side="left")
+        ttk.Button(button_row, text="Copy All (CSV)", command=copy_all).pack(side="left", padx=8)
+        ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side="right")
 
     def _selected_store_id(self) -> str | None:
         selected = self.tree.selection()
@@ -473,6 +683,7 @@ class DealMakerGUI:
         if runner:
             runner.stop()
             self.runners.pop(dealership_id, None)
+        self.store_credentials.pop(dealership_id, None)
         self._refresh_table()
 
     def stop_all(self) -> None:

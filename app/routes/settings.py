@@ -137,6 +137,14 @@ def fetch_token():
     if not token:
         return jsonify({"ok": False, "error": "No access_token in response. Check your credentials."}), 400
 
+    # Validate it looks like a JWT (3 dot-separated parts)
+    if len(token.split(".")) != 3:
+        return jsonify({
+            "ok": False,
+            "error": f"Unexpected token format (got {token[:40]}...). Expected a JWT with 3 parts. "
+                     "Make sure you're logging in with your TopRep account email/password."
+        }), 400
+
     # Persist to environment and .env file
     os.environ["TOPREP_AUTH_TOKEN"] = token
 

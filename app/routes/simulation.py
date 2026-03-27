@@ -151,7 +151,12 @@ class _StoreThread(threading.Thread):
 
             if s["delivery"] in {"api", "both"}:
                 api_url = _resolve_api_url()
-                auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
+                # Use the service role key when no user JWT is configured —
+                # it bypasses RLS so synthetic events for any rep UUID can be inserted.
+                auth_token = (
+                    os.getenv("TOPREP_AUTH_TOKEN", "").strip()
+                    or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+                )
                 supabase_apikey = _resolve_anon_key()
                 if api_url:
                     result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
@@ -194,10 +199,14 @@ def start(store_id: str):
     # Pre-flight auth check when events are delivered to the API.
     if store.get("delivery") in {"api", "both"}:
         api_url = _resolve_api_url()
-        if not is_postgres_dsn(api_url) and not os.getenv("TOPREP_AUTH_TOKEN", "").strip():
+        has_token = (
+            os.getenv("TOPREP_AUTH_TOKEN", "").strip()
+            or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        )
+        if not is_postgres_dsn(api_url) and not has_token:
             return jsonify({
                 "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
-                "hint": "Set TOPREP_AUTH_TOKEN in Settings before starting an API-delivery simulation.",
+                "hint": "Set TOPREP_AUTH_TOKEN or SUPABASE_SERVICE_ROLE_KEY in Settings before starting an API-delivery simulation.",
             }), 401
 
     thread = _StoreThread(store)

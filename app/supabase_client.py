@@ -230,10 +230,18 @@ def seed_source_stage_priors(
     """Upsert source_stage_priors rows for a store.
 
     Each entry in ``priors`` must have: source, stage, prior_alpha, prior_beta.
+    ``store_id`` may be the string dealership ID (e.g. 'dlr-001') or a UUID;
+    it is converted to a deterministic UUID5 when not already a valid UUID.
     """
+    try:
+        import uuid as _uuid
+        _uuid.UUID(store_id)  # already a valid UUID — use as-is
+        store_uuid = store_id
+    except ValueError:
+        store_uuid = _store_uuid(store_id)
     rows = [
         {
-            "store_id": store_id,
+            "store_id": store_uuid,
             "source": p["source"],
             "stage": p["stage"],
             "prior_alpha": float(p["prior_alpha"]),
@@ -266,6 +274,12 @@ def priors_from_archetypes(store_id: str, sources: list[str], stages: list[str])
       - beta = N - alpha  (observations that didn't)
     N is set to 20 as a weak-prior sample size.
     """
+    try:
+        import uuid as _uuid
+        _uuid.UUID(store_id)
+        store_uuid = store_id
+    except ValueError:
+        store_uuid = _store_uuid(store_id)
     from dealmaker_generator import ARCHETYPES  # local import to avoid circular issues at module level
     mean_close_rate = sum(a.close_rate_mult * _DEFAULT_BASE_CLOSE_RATE for a in ARCHETYPES.values()) / len(ARCHETYPES)
     rows = []
@@ -275,7 +289,7 @@ def priors_from_archetypes(store_id: str, sources: list[str], stages: list[str])
             alpha = max(0.5, round(mean_close_rate * n, 2))
             beta = max(0.5, round((1 - mean_close_rate) * n, 2))
             rows.append({
-                "store_id": store_id,
+                "store_id": store_uuid,
                 "source": source,
                 "stage": stage,
                 "prior_alpha": alpha,
@@ -300,12 +314,34 @@ def _generate_password() -> str:
     return "".join(secrets.choice(alphabet) for _ in range(16))
 
 
-def admin_create_user(email: str, password: str) -> dict:
+def _stable_uuid(*parts: str) -> str:
+    """Deterministic UUID5 (NAMESPACE_URL).  Mirrors dealmaker_generator.stable_uuid."""
+    import uuid as _uuid
+    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, "|".join(parts)))
+
+
+def _store_uuid(store_id: str) -> str:
+    """Deterministic UUID for a store string ID (e.g. 'dlr-001')."""
+    return _stable_uuid("store", store_id)
+
+
+def _rep_uuid(dealership_id: str, member_id: str) -> str:
+    """Deterministic UUID for a rep — must match dealmaker_generator.sales_rep_uuid."""
+    return _stable_uuid("sales_rep", dealership_id, member_id)
+
+
+def admin_create_user(email: str, password: str, user_id: str | None = None) -> dict:
     """POST /auth/v1/admin/users using service_role key.
 
     Returns the created user dict or an error dict.
     Refuses to create users whose email domain isn't an obvious test domain
     unless DEALMAKER_ALLOW_PROD_PROVISIONING=1 is set.
+
+    When ``user_id`` is provided it is passed as the ``id`` field so the
+    Supabase auth user gets that exact UUID.  This is critical: DealMaker
+    assigns rep UUIDs deterministically via ``stable_uuid("sales_rep", ...)``,
+    and the provisioned auth user must share that UUID so the RLS policy
+    ``sales_rep_id = auth.uid()`` resolves correctly.
     """
     if not _is_safe_test_email(email) and not os.getenv("DEALMAKER_ALLOW_PROD_PROVISIONING"):
         return {"error": f"Refusing to provision non-test email: {email}. "
@@ -316,11 +352,13 @@ def admin_create_user(email: str, password: str) -> dict:
         return {"error": "SUPABASE_SERVICE_ROLE_KEY not configured"}
 
     url = f"{_base_url()}/auth/v1/admin/users"
-    body = {
+    body: dict = {
         "email": email,
         "password": password,
         "email_confirm": True,
     }
+    if user_id:
+        body["id"] = user_id
     data = json.dumps(body).encode("utf-8")
     req = request.Request(url, data=data, headers=_service_headers(), method="POST")
     try:
@@ -352,7 +390,11 @@ def provision_store_reps(store_config: dict) -> list[dict]:
     credentials: list[dict] = []
     abbrev_counters: dict[str, int] = {}
 
+    # Deterministic UUID for this store (for store_id FK columns)
+    store_uuid = _store_uuid(store_id)
+    # Member ID counter mirrors build_team(): S-001, S-002, ...
     for i in range(1, salespeople + 1):
+        member_id = f"S-{i:03d}"
         arch = archetype_slots[i - 1] if i - 1 < len(archetype_slots) else "solid_mid"
         abbrev = {"rockstar": "rock", "solid_mid": "mid", "underperformer": "under", "new_hire": "new"}.get(arch, "rep")
         abbrev_counters[abbrev] = abbrev_counters.get(abbrev, 0) + 1
@@ -360,40 +402,49 @@ def provision_store_reps(store_config: dict) -> list[dict]:
         email = f"sim-{store_slug}-{abbrev}{n}@test.com"
         password = "test123"
 
-        result = admin_create_user(email, password)
+        # Deterministic UUID that matches dealmaker_generator.sales_rep_uuid()
+        rep_uuid = _rep_uuid(store_id, member_id)
+
+        result = admin_create_user(email, password, user_id=rep_uuid)
         if "error" in result:
-            credentials.append({
-                "rep_name": f"Sales Rep {i}",
-                "archetype": arch,
-                "email": email,
-                "password": password,
-                "user_id": None,
-                "error": result["error"],
-            })
-            continue
+            # If user already exists that's fine — use the stable UUID we specified
+            error_text = str(result.get("error", ""))
+            if "already" in error_text.lower() or result.get("status") == 422:
+                user_id: str | None = rep_uuid  # UUID was pre-determined; reuse it
+            else:
+                credentials.append({
+                    "rep_name": f"Sales Rep {i}",
+                    "archetype": arch,
+                    "email": email,
+                    "password": password,
+                    "user_id": None,
+                    "error": error_text,
+                })
+                continue
+        else:
+            user_id = result.get("id") or result.get("user", {}).get("id") or rep_uuid
 
-        user_id = result.get("id") or result.get("user", {}).get("id")
-
-        # Upsert profile
+        # Upsert profile — uses service headers so the RLS insert policy is bypassed
         if user_id:
             profile_body = {
                 "id": user_id,
-                "first_name": f"Sales",
+                "email": email,
+                "first_name": "Sales",
                 "last_name": f"Rep {i}",
                 "role": "sales_rep",
-                "store_id": store_id,
+                "store_id": store_uuid,
             }
             rest_post_with_headers(
                 path="profiles",
                 body=profile_body,
-                headers={**_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+                headers={**_service_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
             )
             # Upsert reps row
-            reps_body = {"id": user_id, "store_id": store_id}
+            reps_body = {"id": user_id, "store_id": store_uuid}
             rest_post_with_headers(
                 path="reps",
                 body=reps_body,
-                headers={**_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+                headers={**_service_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
             )
 
         credentials.append({
