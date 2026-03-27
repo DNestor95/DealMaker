@@ -145,6 +145,14 @@ body {
   border-radius: var(--radius);
   padding: 28px 32px;
   max-width: 800px;
+  margin: 0 auto 24px;
+}
+
+/* ── Form-width constraint (page-headers / alerts beside form-cards) ── */
+.form-width {
+  max-width: 800px;
+  margin-left: auto;
+  margin-right: auto;
 }
 .form-section { margin-bottom: 32px; }
 .form-section h2 {

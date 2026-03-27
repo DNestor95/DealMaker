@@ -1,18 +1,18 @@
 {% extends "base.html" %}
 {% block title %}— Edit {{ store.dealership_id }}{% endblock %}
 {% block content %}
-<div class="page-header">
+<div class="page-header form-width">
   <h1>Edit Store — <span style="color:var(--primary)">{{ store.dealership_id }}</span></h1>
 </div>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
   {% for category, message in messages %}
-    <div class="alert alert--{{ category }}">{{ message }}</div>
+    <div class="alert alert--{{ category }} form-width">{{ message }}</div>
   {% endfor %}
 {% endwith %}
 
 {% if store.status == 'running' %}
-<div class="alert alert--warning">
+<div class="alert alert--warning form-width">
   ⚠ This store is currently running. Saving will stop the simulation automatically. You can restart it from the store detail page.
 </div>
 {% endif %}

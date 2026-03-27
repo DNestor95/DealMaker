@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}— New Store{% endblock %}
 {% block content %}
-<div class="page-header">
+<div class="page-header form-width">
   <h1>Create New Store</h1>
 </div>
 
 {% if error %}
-<div class="alert alert--error">{{ error }}</div>
+<div class="alert alert--error form-width">{{ error }}</div>
 {% endif %}
 
 <form method="POST" action="{{ url_for('stores.create_store') }}" class="form-card" id="store-form">
