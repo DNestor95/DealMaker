@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}— Settings{% endblock %}
 {% block content %}
-<div class="page-header">
+<div class="page-header form-width">
   <h1>API Settings</h1>
 </div>
 
@@ -24,7 +24,7 @@
 
 {% set service_key_field = fields | selectattr('key', 'equalto', 'SUPABASE_SERVICE_ROLE_KEY') | first %}
 {% if service_key_field and not service_key_field.configured %}
-<div class="alert alert--warning">
+<div class="alert alert--warning form-width">
   ⚠ <strong>SUPABASE_SERVICE_ROLE_KEY</strong> is not set. Rep user provisioning (Phase 4) will be unavailable until this is configured.
 </div>
 {% endif %}
