@@ -27,11 +27,24 @@ _APP_ROOT = Path(__file__).parent.parent.parent
 # Import core generation helpers from v1 generator (still valid in v2)
 sys.path.insert(0, str(_APP_ROOT))
 from dealmaker_generator import AUTH_ERROR_401, build_team, generate_events, normalize_delivery_url, send_events_to_api
+from app.supabase_client import _api_url as _supabase_api_url, _anon_key as _supabase_anon_key
 
 bp = Blueprint("simulation", __name__, url_prefix="/simulation")
 
 # Absolute path to project root — avoids CWD-relative bugs in production.
 _APP_ROOT = Path(__file__).parent.parent.parent
+
+
+def _resolve_api_url() -> str:
+    """Return the delivery URL, falling back to the hardcoded TopRep Supabase URL."""
+    url = os.getenv("TOPREP_API_URL", "").strip() or database_url_from_env().strip()
+    if not url:
+        url = _supabase_api_url()  # hardcoded fallback in supabase_client
+    return normalize_delivery_url(url)
+
+
+def _resolve_anon_key() -> str:
+    return os.getenv("SUPABASE_ANON_KEY", "") or _supabase_anon_key()
 
 # ---------------------------------------------------------------------------
 # Running thread registry
@@ -137,9 +150,9 @@ class _StoreThread(threading.Thread):
                         fh.write(json.dumps(ev.to_dict(), separators=(",", ":")) + "\n")
 
             if s["delivery"] in {"api", "both"}:
-                api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", "") or database_url_from_env())
+                api_url = _resolve_api_url()
                 auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
-                supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "")
+                supabase_apikey = _resolve_anon_key()
                 if api_url:
                     result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
                     if result["failed"] > 0 and result["errors"]:
@@ -151,7 +164,7 @@ class _StoreThread(threading.Thread):
                     else:
                         self.last_error = None
                 else:
-                    self.last_error = "TOPREP_API_URL or DATABASE_URL not configured"
+                    self.last_error = "Could not resolve API URL — check Settings"
 
             self.events_sent += len(events)
             self.last_batch_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -180,7 +193,7 @@ def start(store_id: str):
 
     # Pre-flight auth check when events are delivered to the API.
     if store.get("delivery") in {"api", "both"}:
-        api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", "") or database_url_from_env())
+        api_url = _resolve_api_url()
         if not is_postgres_dsn(api_url) and not os.getenv("TOPREP_AUTH_TOKEN", "").strip():
             return jsonify({
                 "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",

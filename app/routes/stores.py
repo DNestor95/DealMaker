@@ -31,6 +31,8 @@ from app.supabase_client import (
     provision_store_reps,
     rest_get,
     seed_source_stage_priors,
+    _api_url as _supabase_api_url,
+    _anon_key as _supabase_anon_key,
 )
 
 # Absolute path to the project root so output/ is always found regardless of CWD.
@@ -519,9 +521,10 @@ def backfill_store(store_id: str):
 
     errors_count = 0
     if delivery in {"api", "both"}:
-        api_url = normalize_delivery_url(os.getenv("TOPREP_API_URL", "") or database_url_from_env())
+        raw_url = os.getenv("TOPREP_API_URL", "").strip() or database_url_from_env().strip() or _supabase_api_url()
+        api_url = normalize_delivery_url(raw_url)
         auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
-        supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "")
+        supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "") or _supabase_anon_key()
         if not is_postgres_dsn(api_url) and not auth_token.strip():
             return jsonify({
                 "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
