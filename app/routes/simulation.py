@@ -148,6 +148,10 @@ class _StoreThread(threading.Thread):
                 gross_profit_max=s.get("gross_profit_max", 6000),
                 activities_min=s.get("activities_per_deal_min", 2),
                 activities_max=s.get("activities_per_deal_max", 6),
+                contact_rate=s.get("contact_rate_pct", 72) / 100.0,
+                appointment_rate=s.get("appointment_rate_pct", 55) / 100.0,
+                showroom_rate=s.get("showroom_rate_pct", 65) / 100.0,
+                negotiation_rate=s.get("negotiation_rate_pct", 80) / 100.0,
                 month_shape=s.get("month_shape", "flat"),
                 scenarios=s.get("default_scenarios", []),
             )

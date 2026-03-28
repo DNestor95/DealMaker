@@ -173,6 +173,10 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         "gross_profit_max": int(data.get("gross_profit_max", 6000)),
         "close_rate_pct": int(data.get("close_rate_pct", 36)),
         "status_advance_pct": int(data.get("status_advance_pct", 88)),
+        "contact_rate_pct": int(data.get("contact_rate_pct", 72)),
+        "appointment_rate_pct": int(data.get("appointment_rate_pct", 55)),
+        "showroom_rate_pct": int(data.get("showroom_rate_pct", 65)),
+        "negotiation_rate_pct": int(data.get("negotiation_rate_pct", 80)),
         "activities_per_deal_min": int(data.get("activities_per_deal_min", 2)),
         "activities_per_deal_max": int(data.get("activities_per_deal_max", 6)),
         "archetype_dist": archetype_dist,
@@ -211,6 +215,10 @@ for _s in _stores.values():
     _s.setdefault("sim_speed_multiplier", 1.0)
     _s.setdefault("sim_days_total", 0)
     _s.setdefault("sim_start_date", "")
+    _s.setdefault("contact_rate_pct", 72)
+    _s.setdefault("appointment_rate_pct", 55)
+    _s.setdefault("showroom_rate_pct", 65)
+    _s.setdefault("negotiation_rate_pct", 80)
 
 
 STORE_TEMPLATES = {
