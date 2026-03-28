@@ -27,7 +27,7 @@ _APP_ROOT = Path(__file__).parent.parent.parent
 # Import core generation helpers from v1 generator (still valid in v2)
 sys.path.insert(0, str(_APP_ROOT))
 from dealmaker_generator import AUTH_ERROR_401, build_team, generate_events, normalize_delivery_url, send_events_to_api
-from app.supabase_client import _api_url as _supabase_api_url, _anon_key as _supabase_anon_key
+from app.supabase_client import _api_url as _supabase_api_url, _anon_key as _supabase_anon_key, rest_get as supabase_rest_get
 
 bp = Blueprint("simulation", __name__, url_prefix="/simulation")
 
@@ -53,6 +53,17 @@ _runners: dict[str, "_StoreThread"] = {}
 
 
 class _StoreThread(threading.Thread):
+    """Background thread that runs the simulation loop for a single store.
+
+    Transient errors (network timeouts, temporary 5xx, etc.) trigger an
+    automatic retry with exponential back-off (up to ``_MAX_RETRIES``).
+    Fatal errors — 401 auth failures or FK-constraint violations — stop
+    the thread permanently because they require human intervention.
+    """
+
+    _MAX_RETRIES = 10
+    _BASE_BACKOFF = 5.0   # seconds; doubles each retry up to ~42 min cap
+
     def __init__(self, store: dict) -> None:
         super().__init__(daemon=True)
         self._store = store
@@ -61,14 +72,49 @@ class _StoreThread(threading.Thread):
         self.last_batch_at: str | None = None
         self.last_error: str | None = None
         # Accelerated-time tracking (populated during run)
+        self._sim_current: datetime | None = None   # persisted across retries
         self.simulated_date: str | None = None
         self.sim_days_elapsed: float = 0.0
         self.speed_preset: str = store.get("sim_speed_preset", "realtime")
+        # Auto-restart tracking
+        self.retries: int = 0
+        self._fatal: bool = False
 
     def stop(self) -> None:
         self._stop_event.set()
 
+    def _is_fatal_error(self, error_msg: str) -> bool:
+        """Return True for errors that need human intervention (no auto-retry)."""
+        return error_msg.startswith(AUTH_ERROR_401) or "23503" in error_msg
+
     def run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._run_loop()
+            except Exception as exc:
+                error_msg = str(exc)[:200]
+                self.last_error = f"crash: {error_msg}"
+                if self._is_fatal_error(error_msg) or self._stop_event.is_set():
+                    self._fatal = True
+                    break
+                self.retries += 1
+                if self.retries > self._MAX_RETRIES:
+                    self.last_error = f"Exceeded {self._MAX_RETRIES} retries — last: {error_msg}"
+                    break
+                backoff = min(self._BASE_BACKOFF * (2 ** (self.retries - 1)), 2560.0)
+                self.last_error = f"retry {self.retries}/{self._MAX_RETRIES} in {backoff:.0f}s — {error_msg}"
+                self._store["status"] = "reconnecting"
+                if self._stop_event.wait(backoff):
+                    break
+                self._store["status"] = "running"
+            else:
+                # _run_loop exited normally (sim days finished or stop requested)
+                break
+
+        self._store["status"] = "stopped"
+
+    def _run_loop(self) -> None:
+        """Inner simulation loop — separated so run() can restart on failure."""
         s = self._store
 
         # ── Resolve speed multiplier ───────────────────────────────────────
@@ -84,25 +130,23 @@ class _StoreThread(threading.Thread):
         batch_days: int = s.get("batch_days", 1)
 
         # Real seconds to sleep between batches.
-        # For realtime mode keep the original every_seconds behaviour; for
-        # accelerated modes derive the interval from the speed multiplier so
-        # that batch_days of simulated time passes in the correct real time.
         if speed_mult <= 1.0:
             sleep_seconds: float = float(s.get("every_seconds", 10))
         else:
             sleep_seconds = (batch_days * 86400.0) / speed_mult
 
-        # ── Determine simulation start date ───────────────────────────────
-        raw_start = s.get("sim_start_date", "")
-        if raw_start:
-            try:
-                sim_current = datetime.fromisoformat(raw_start).replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                sim_current = datetime.now(timezone.utc)
-        else:
-            sim_current = datetime.now(timezone.utc)
+        # ── Determine simulation start date (only on first entry) ─────────
+        if self._sim_current is None:
+            raw_start = s.get("sim_start_date", "")
+            if raw_start:
+                try:
+                    self._sim_current = datetime.fromisoformat(raw_start).replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    self._sim_current = datetime.now(timezone.utc)
+            else:
+                self._sim_current = datetime.now(timezone.utc)
 
-        self.simulated_date = sim_current.isoformat().replace("+00:00", "Z")
+        self.simulated_date = self._sim_current.isoformat().replace("+00:00", "Z")
 
         # ── Total days cap (0 = run indefinitely) ─────────────────────────
         sim_days_total: int = int(s.get("sim_days_total", 0))
@@ -134,7 +178,7 @@ class _StoreThread(threading.Thread):
                 break
 
             events = generate_events(
-                start_date=sim_current,
+                start_date=self._sim_current,
                 days=batch_days,
                 daily_leads=s["daily_leads"],
                 team=team,
@@ -188,12 +232,14 @@ class _StoreThread(threading.Thread):
                     )
                     if result["failed"] > 0 and result["errors"]:
                         self.last_error = str(result["errors"][0])[:140]
-                        # Stop the thread on authentication failure to avoid
-                        # burning through retries with a token that won't work.
-                        if self.last_error.startswith(AUTH_ERROR_401) or "23503" in self.last_error:
-                            self._stop_event.set()
+                        # Fatal errors require human intervention — raise to
+                        # trigger the retry/stop logic in run().
+                        if self._is_fatal_error(self.last_error):
+                            raise RuntimeError(self.last_error)
                     else:
                         self.last_error = None
+                        # Successful batch resets the retry counter
+                        self.retries = 0
                 else:
                     self.last_error = "Could not resolve API URL — check Settings"
 
@@ -203,14 +249,12 @@ class _StoreThread(threading.Thread):
             batch += 1
 
             # Advance the simulated clock
-            sim_current += timedelta(days=batch_days)
+            self._sim_current += timedelta(days=batch_days)
             self.sim_days_elapsed += batch_days
-            self.simulated_date = sim_current.isoformat().replace("+00:00", "Z")
+            self.simulated_date = self._sim_current.isoformat().replace("+00:00", "Z")
 
             if self._stop_event.wait(sleep_seconds):
                 break
-
-        s["status"] = "stopped"
 
 
 @bp.route("/<store_id>/start", methods=["POST"])
@@ -234,6 +278,25 @@ def start(store_id: str):
                 "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
                 "hint": "Set TOPREP_AUTH_TOKEN or SUPABASE_SERVICE_ROLE_KEY in Settings before starting an API-delivery simulation.",
             }), 401
+
+        # Pre-flight profiles check — verify provisioned rep UUIDs exist in the
+        # profiles table before starting, to avoid FK 23503 errors mid-run.
+        cred_ids = [
+            c.get("user_id")
+            for c in store.get("credentials", [])
+            if isinstance(c, dict) and c.get("user_id") and not c.get("error")
+        ]
+        if cred_ids and not is_postgres_dsn(api_url):
+            ids_filter = f"({','.join(cred_ids)})"
+            existing = supabase_rest_get("profiles", {"id": f"in.{ids_filter}", "select": "id"})
+            existing_ids = {p["id"] for p in existing if p.get("id")}
+            missing = [uid for uid in cred_ids if uid not in existing_ids]
+            if missing:
+                return jsonify({
+                    "error": f"{len(missing)} rep profile(s) missing from the database.",
+                    "hint": "Re-provision reps from the store detail page before starting the simulation.",
+                    "missing_ids": missing[:5],
+                }), 409
 
     thread = _StoreThread(store)
     _runners[store_id] = thread
@@ -277,6 +340,7 @@ def status(store_id: str):
         "sim_days_total": sim_days_total if sim_days_total > 0 else None,
         "progress_pct": progress_pct,
         "speed_preset": store.get("sim_speed_preset", "realtime"),
+        "retries": thread.retries if thread else 0,
     })
 
 

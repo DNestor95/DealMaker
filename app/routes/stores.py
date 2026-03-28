@@ -569,6 +569,13 @@ def backfill_store(store_id: str):
     month_shape = request.form.get("month_shape", store.get("month_shape", "flat"))
     delivery = request.form.get("delivery", store.get("delivery", "file"))
 
+    # Use provisioned profile UUIDs so events FK to existing profiles rows
+    explicit_rep_ids = [
+        c.get("user_id")
+        for c in store.get("credentials", [])
+        if isinstance(c, dict) and c.get("user_id") and not c.get("error")
+    ]
+
     events = generate_events(
         start_date=start_dt,
         days=days,
@@ -576,6 +583,7 @@ def backfill_store(store_id: str):
         team=team,
         dealership_id=store_id,
         seed=store["seed"],
+        sales_rep_ids=explicit_rep_ids or None,
         base_close_rate=store["close_rate_pct"] / 100.0,
         deal_amount_min=store["deal_amount_min"],
         deal_amount_max=store["deal_amount_max"],
@@ -583,6 +591,10 @@ def backfill_store(store_id: str):
         gross_profit_max=store["gross_profit_max"],
         activities_min=store["activities_per_deal_min"],
         activities_max=store["activities_per_deal_max"],
+        contact_rate=store.get("contact_rate_pct", 72) / 100.0,
+        appointment_rate=store.get("appointment_rate_pct", 55) / 100.0,
+        showroom_rate=store.get("showroom_rate_pct", 65) / 100.0,
+        negotiation_rate=store.get("negotiation_rate_pct", 80) / 100.0,
         month_shape=month_shape,
         scenarios=scenarios,
     )
@@ -598,12 +610,19 @@ def backfill_store(store_id: str):
     if delivery in {"api", "both"}:
         raw_url = os.getenv("TOPREP_API_URL", "").strip() or database_url_from_env().strip() or _supabase_api_url()
         api_url = normalize_delivery_url(raw_url)
-        auth_token = os.getenv("TOPREP_AUTH_TOKEN", "")
+        service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        user_jwt = os.getenv("TOPREP_AUTH_TOKEN", "").strip()
+        # Use service role for direct Supabase REST writes (bypasses RLS)
+        is_rest_write = "/rest/v1/" in api_url
+        if is_rest_write and service_key:
+            auth_token = service_key
+        else:
+            auth_token = user_jwt or service_key
         supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "") or _supabase_anon_key()
-        if not is_postgres_dsn(api_url) and not auth_token.strip():
+        if not is_postgres_dsn(api_url) and not auth_token:
             return jsonify({
                 "error": "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN.",
-                "hint": "Set TOPREP_AUTH_TOKEN in Settings before running an API-delivery backfill.",
+                "hint": "Set TOPREP_AUTH_TOKEN or SUPABASE_SERVICE_ROLE_KEY in Settings before running an API-delivery backfill.",
             }), 401
         if api_url:
             result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
