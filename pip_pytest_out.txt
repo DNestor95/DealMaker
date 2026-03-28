@@ -1,0 +1,6 @@
+Requirement already satisfied: pytest in c:\python312\lib\site-packages (9.0.2)
+Requirement already satisfied: colorama>=0.4 in c:\python312\lib\site-packages (from pytest) (0.4.6)
+Requirement already satisfied: iniconfig>=1.0.1 in c:\python312\lib\site-packages (from pytest) (2.3.0)
+Requirement already satisfied: packaging>=22 in c:\python312\lib\site-packages (from pytest) (24.1)
+Requirement already satisfied: pluggy<2,>=1.5 in c:\python312\lib\site-packages (from pytest) (1.6.0)
+Requirement already satisfied: pygments>=2.7.2 in c:\python312\lib\site-packages (from pytest) (2.18.0)

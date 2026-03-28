@@ -25,14 +25,18 @@ from flask import Blueprint, flash, jsonify, redirect, render_template, request,
 
 from dealmaker_postgres import database_url_from_env, is_postgres_dsn
 from app.supabase_client import (
+    deactivate_store,
     deprovision_store_reps,
     get_profiles,
     priors_from_archetypes,
     provision_store_reps,
+    purge_store_data,
     rest_get,
     seed_source_stage_priors,
+    store_uuid as canonical_store_uuid,
     _api_url as _supabase_api_url,
     _anon_key as _supabase_anon_key,
+    upsert_store,
 )
 
 # Absolute path to the project root so output/ is always found regardless of CWD.
@@ -91,6 +95,24 @@ def _load_stores() -> dict[str, dict]:
 
 def _save_stores(stores: dict[str, dict]) -> None:
     _STORES_FILE.write_text(json.dumps(stores, indent=2), encoding="utf-8")
+
+
+def _sync_store_record(store: dict, active: bool = True) -> dict | None:
+    """Best-effort sync of the canonical stores row in Supabase."""
+    if not _supabase_api_url():
+        return None
+    return upsert_store(store, active=active)
+
+
+def reconcile_store_records() -> list[str]:
+    """Ensure every locally configured store has a canonical Supabase row."""
+    sync_errors: list[str] = []
+    for store_id, store in _stores.items():
+        is_active = str(store.get("status", "stopped")) != "deleted"
+        result = _sync_store_record(store, active=is_active)
+        if isinstance(result, dict) and result.get("error"):
+            sync_errors.append(f"{store_id}: {result['error']}")
+    return sync_errors
 
 
 def _parse_hire_dates(store: dict) -> list[date | None]:
@@ -286,8 +308,19 @@ def create_store():
     _stores[store_id] = store
     _save_stores(_stores)
 
+    sync_result = _sync_store_record(store, active=True)
+    sync_error = sync_result.get("error") if isinstance(sync_result, dict) else None
+    if sync_error:
+        _stores.pop(store_id, None)
+        _save_stores(_stores)
+        return render_template(
+            "stores/new.html",
+            error=f"Failed to create canonical store row for '{store_id}': {sync_error}",
+            **_FORM_CONTEXT,
+        )
+
     # Auto-seed Bayesian priors if connected
-    if os.getenv("TOPREP_API_URL"):
+    if _supabase_api_url():
         prior_rows = priors_from_archetypes(
             store_id=store_id,
             sources=store["lead_sources"],
@@ -319,6 +352,9 @@ def create_store():
             f"Store '{store_id}' created. Add SUPABASE_SERVICE_ROLE_KEY in Settings to provision rep logins.",
             "info",
         )
+
+    if sync_error:
+        flash(f"Store row sync failed for '{store_id}': {sync_error}", "warning")
 
     return redirect(url_for("stores.store_detail", store_id=store_id) + anchor)
 
@@ -357,6 +393,10 @@ def update_store(store_id: str):
     _stores[store_id] = updated
     _save_stores(_stores)
 
+    sync_result = _sync_store_record(updated, active=True)
+    if isinstance(sync_result, dict) and sync_result.get("error"):
+        flash(f"Store row sync failed for '{store_id}': {sync_result['error']}", "warning")
+
     flash(f"Store '{store_id}' updated.", "success")
     return redirect(url_for("stores.store_detail", store_id=store_id))
 
@@ -369,7 +409,8 @@ def store_detail(store_id: str):
 
     # Try to pull live rep profiles tied to this store from TopRep
     profiles = get_profiles()
-    store_profiles = [p for p in profiles if p.get("store_id") == store_id]
+    store_uuid = canonical_store_uuid(store_id)
+    store_profiles = [p for p in profiles if p.get("store_id") in {store_id, store_uuid}]
 
     service_key_configured = bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""))
     toprep_url_configured = bool(os.getenv("TOPREP_APP_URL", ""))
@@ -390,9 +431,35 @@ def store_detail(store_id: str):
 
 @bp.route("/stores/<store_id>/delete", methods=["POST"])
 def delete_store(store_id: str):
-    _stores.pop(store_id, None)
+    # Stop any running simulation first
+    from app.routes.simulation import _runners
+    thread = _runners.get(store_id)
+    if thread and thread.is_alive():
+        thread.stop()
+        thread.join(timeout=5)
+
+    store = _stores.pop(store_id, None)
     _save_stores(_stores)
-    flash(f"Store '{store_id}' deleted.", "info")
+
+    if _supabase_api_url():
+        # Purge all database rows (events, activities, deals, reps, profiles, stores)
+        purge_result = purge_store_data(store_id)
+        if purge_result.get("errors"):
+            error_summary = "; ".join(
+                f"{t}: {e.get('error', '')}" for t, e in purge_result["errors"].items()
+            )
+            flash(f"Some data could not be removed for '{store_id}': {error_summary}", "warning")
+
+        # Delete provisioned auth users
+        if os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+            deprov = deprovision_store_reps(store_id)
+            if deprov.get("errors"):
+                flash(
+                    f"Auth user cleanup had errors for '{store_id}': {'; '.join(deprov['errors'])}",
+                    "warning",
+                )
+
+    flash(f"Store '{store_id}' and all associated data deleted.", "info")
     return redirect(url_for("stores.index"))
 
 

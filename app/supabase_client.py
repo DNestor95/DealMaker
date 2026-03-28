@@ -170,6 +170,26 @@ def rest_get(path: str, params: dict | None = None) -> list[dict]:
         return []
 
 
+def rest_delete(path: str, params: dict | None = None) -> dict:
+    """REST DELETE against the Supabase REST API using service-role headers."""
+    base = _base_url()
+    if not base:
+        return {"error": "No API URL configured"}
+    url = f"{base}/rest/v1/{path}"
+    if params:
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        url = f"{url}?{qs}"
+    try:
+        req = request.Request(url, headers=_service_headers(), method="DELETE")
+        with request.urlopen(req, timeout=30, context=_ssl_ctx()) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except error.HTTPError as exc:
+        return {"error": exc.read().decode("utf-8"), "status": exc.code}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def rest_post(path: str, body: dict) -> dict:
     """Simple REST POST against the Supabase REST API."""
     base = _base_url()
@@ -346,6 +366,47 @@ def _store_uuid(store_id: str) -> str:
     return _stable_uuid("store", store_id)
 
 
+def store_uuid(store_id: str) -> str:
+    """Public helper for the canonical deterministic store UUID."""
+    return _store_uuid(store_id)
+
+
+def _store_headers() -> dict[str, str]:
+    """Prefer service-role headers for server-side store sync, fall back to user headers."""
+    service_headers = _service_headers()
+    if service_headers.get("Authorization"):
+        return service_headers
+    return _headers()
+
+
+def _store_config_payload(store_config: dict) -> dict:
+    """Return a sanitized store config safe to persist in the stores table."""
+    excluded = {"credentials", "events_sent", "status", "last_error", "last_batch_at"}
+    return {key: value for key, value in store_config.items() if key not in excluded}
+
+
+def upsert_store(store_config: dict, active: bool = True) -> dict:
+    """Upsert the canonical stores row for a DealMaker store config."""
+    store_id = str(store_config.get("dealership_id", "")).strip()
+    if not store_id:
+        return {"error": "dealership_id is required"}
+
+    body = {
+        "id": _store_uuid(store_id),
+        "dealership_id": store_id,
+        "name": str(store_config.get("display_name") or store_id),
+        "active": active,
+        "config": _store_config_payload(store_config),
+    }
+    headers = {**_store_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"}
+    return rest_post_with_headers("stores", body, headers)
+
+
+def deactivate_store(store_id: str) -> dict:
+    """Soft-delete a store by marking its canonical stores row inactive."""
+    return upsert_store({"dealership_id": store_id}, active=False)
+
+
 def _rep_uuid(dealership_id: str, member_id: str) -> str:
     """Deterministic UUID for a rep — must match dealmaker_generator.sales_rep_uuid."""
     return _stable_uuid("sales_rep", dealership_id, member_id)
@@ -398,6 +459,7 @@ def provision_store_reps(store_config: dict) -> list[dict]:
     Returns a list of credential dicts: {rep_name, archetype, email, password, user_id}.
     """
     store_id = store_config.get("dealership_id", "unknown")
+    upsert_store(store_config, active=True)
     # Build a slug: lowercase, replace non-alphanum with hyphen
     store_slug = re.sub(r"[^a-z0-9]+", "-", store_id.lower()).strip("-")
     archetype_dist: dict[str, int] = store_config.get("archetype_dist", {})
@@ -535,3 +597,45 @@ def deprovision_store_reps(store_id: str) -> dict:
                 errors.append(f"{email}: {exc}")
 
     return {"deleted": deleted, "errors": errors}
+
+
+def purge_store_data(store_id: str) -> dict:
+    """Delete all database rows associated with a store.
+
+    Deletion order respects FK constraints:
+    1. Collect rep UUIDs from profiles WHERE store_id = <store_uuid>
+    2. Delete events, activities, deals by sales_rep_id IN (rep UUIDs)
+    3. Delete leads, source_stage_priors, quotas by store_id
+    4. Delete reps (cascades: quotas, rep_stage_stats, rep_stage_posteriors,
+       rep_experience, forecast_runs → scenario_runs, rep_month_stats, rep_month_forecast)
+    5. Delete profiles
+    6. Delete the stores row itself
+    """
+    su = _store_uuid(store_id)
+    results: dict[str, dict | str] = {}
+
+    # 1. Collect rep UUIDs belonging to this store
+    rep_rows = rest_get("profiles", {"store_id": f"eq.{su}", "select": "id"})
+    rep_ids = [r["id"] for r in rep_rows if r.get("id")]
+
+    # 2. Delete rep-scoped data (events, activities, deals)
+    if rep_ids:
+        ids_filter = f"({','.join(rep_ids)})"
+        for table in ("events", "activities", "deals"):
+            results[table] = rest_delete(table, {"sales_rep_id": f"in.{ids_filter}"})
+
+    # 3. Delete store-scoped data
+    for table in ("leads", "source_stage_priors"):
+        results[table] = rest_delete(table, {"store_id": f"eq.{su}"})
+
+    # 4. Delete reps (CASCADE handles quotas, rep_stage_stats, etc.)
+    results["reps"] = rest_delete("reps", {"store_id": f"eq.{su}"})
+
+    # 5. Delete profiles
+    results["profiles"] = rest_delete("profiles", {"store_id": f"eq.{su}"})
+
+    # 6. Delete the canonical stores row
+    results["stores"] = rest_delete("stores", {"id": f"eq.{su}"})
+
+    errors = {k: v for k, v in results.items() if isinstance(v, dict) and v.get("error")}
+    return {"ok": not errors, "details": results, "errors": errors}

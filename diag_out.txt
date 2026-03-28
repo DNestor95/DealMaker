@@ -1,0 +1,46 @@
+=== 1. Listing sim-dlr-002-* users in Auth ===
+Found 4 sim-dlr-002 users:
+  sim-dlr-002-under1@test.com  id=127fe8b7-2482-5927-8d48-59d434cb6f80  confirmed=True  last_sign_in=2026-03-28T02:09:44.352598Z
+  sim-dlr-002-mid2@test.com  id=42846dd0-ebc2-5c45-a2ee-574440e90181  confirmed=True  last_sign_in=never
+  sim-dlr-002-mid1@test.com  id=73ad3bd1-54ea-590e-83d9-98444b9cbf0a  confirmed=True  last_sign_in=never
+  sim-dlr-002-rock1@test.com  id=8d0a4abe-a27f-5ce1-8051-bcd945a90d51  confirmed=True  last_sign_in=2026-03-27T05:29:08.777278Z
+
+=== 2. Attempting sign-in for sim-dlr-002-under1@test.com ===
+  SUCCESS: got access_token=True user_id=127fe8b7-2482-5927-8d48-59d434cb6f80
+
+=== 3. Checking profile row for 127fe8b7-2482-5927-8d48-59d434cb6f80 ===
+  Profile found: {
+  "id": "127fe8b7-2482-5927-8d48-59d434cb6f80",
+  "email": "sim-dlr-002-under1@test.com",
+  "first_name": "Sales",
+  "last_name": "Rep 4",
+  "role": "sales_rep",
+  "store_id": "7c25af3d-4b33-5b39-9b42-62257166f853"
+}
+
+=== 4. Checking reps row for 127fe8b7-2482-5927-8d48-59d434cb6f80 ===
+  Reps row found: {
+  "id": "127fe8b7-2482-5927-8d48-59d434cb6f80",
+  "store_id": "7c25af3d-4b33-5b39-9b42-62257166f853"
+}
+
+=== 5. RLS: sign in as rep, read own profile + reps row ===
+  Own profile via JWT: [{'id': '127fe8b7-2482-5927-8d48-59d434cb6f80', 'role': 'sales_rep', 'store_id': '7c25af3d-4b33-5b39-9b42-62257166f853'}]
+  Own reps row via JWT: [{'id': '127fe8b7-2482-5927-8d48-59d434cb6f80', 'store_id': '7c25af3d-4b33-5b39-9b42-62257166f853'}]
+  Events via JWT (last 3): [
+  {
+    "id": "551406a8-56fa-48e2-bbe8-e42ad4862d91",
+    "type": "activity.completed",
+    "created_at": "2026-04-26T03:16:00+00:00"
+  },
+  {
+    "id": "2b2140ac-10a2-4b2b-a16f-670ad41c53fd",
+    "type": "activity.completed",
+    "created_at": "2026-04-26T01:32:00+00:00"
+  },
+  {
+    "id": "5f438805-863e-4757-9814-b4e13c5c3796",
+    "type": "deal.status_changed",
+    "created_at": "2026-04-26T01:24:00+00:00"
+  }
+]

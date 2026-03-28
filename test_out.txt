@@ -1,0 +1,29 @@
+Total events: 150
+Event types: {
+  "deal.created": 11,
+  "activity.scheduled": 51,
+  "activity.completed": 51,
+  "deal.status_changed": 37
+}
+Milestones: {
+  "contact": 11,
+  "appointment": 16,
+  "follow_up": 10,
+  "showroom": 9,
+  "negotiation": 5
+}
+action_score present: True
+Sample event keys: ['sales_rep_id', 'type', 'payload', 'created_at']
+Sample payload keys: ['deal_id', 'customer_name', 'deal_amount', 'gross_profit', 'source']
+Sample event: {
+  "sales_rep_id": "2773800d-469d-56f7-8be7-d5f31584eb14",
+  "type": "deal.created",
+  "payload": {
+    "deal_id": "b81bd8a1-563e-541e-a9f2-73a15ce4c2fc",
+    "customer_name": "Customer 00003",
+    "deal_amount": 16337,
+    "gross_profit": 2428,
+    "source": "third_party"
+  },
+  "created_at": "2026-01-01T13:32:00.000Z"
+}

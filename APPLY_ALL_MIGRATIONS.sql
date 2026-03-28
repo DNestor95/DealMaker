@@ -451,6 +451,58 @@ FOR EACH ROW EXECUTE PROCEDURE events_to_stats_trigger();
 -- Monte Carlo + Bayesian engine schema additions for TOPREP MVP.
 -- This migration is additive and keeps existing phase-0 forecast tables intact.
 
+CREATE TABLE IF NOT EXISTS stores (
+  id UUID PRIMARY KEY,
+  dealership_id TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT true,
+  config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+ALTER TABLE stores ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can read their store" ON stores;
+CREATE POLICY "Users can read their store" ON stores
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1
+      FROM profiles
+      WHERE id = auth.uid()
+        AND (profiles.store_id = stores.id OR profiles.role IN ('manager', 'admin'))
+    )
+  );
+
+DROP POLICY IF EXISTS "Managers can insert stores" ON stores;
+CREATE POLICY "Managers can insert stores" ON stores
+  FOR INSERT WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM profiles
+      WHERE id = auth.uid() AND role IN ('manager', 'admin')
+    )
+  );
+
+DROP POLICY IF EXISTS "Managers can update stores" ON stores;
+CREATE POLICY "Managers can update stores" ON stores
+  FOR UPDATE USING (
+    EXISTS (
+      SELECT 1
+      FROM profiles
+      WHERE id = auth.uid() AND role IN ('manager', 'admin')
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM profiles
+      WHERE id = auth.uid() AND role IN ('manager', 'admin')
+    )
+  );
+
+GRANT SELECT, INSERT, UPDATE ON stores TO authenticated;
+
 CREATE TABLE IF NOT EXISTS reps (
   id UUID PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
   store_id UUID,
