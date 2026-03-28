@@ -450,6 +450,53 @@ def make_event(
     )
 
 
+def _bounded_rate(value: float) -> float:
+    return min(1.0, max(0.0, float(value)))
+
+
+def _activity_score(
+    activity_type: str,
+    outcome: str,
+    archetype: str,
+    stage: str,
+    rng: random.Random,
+) -> float:
+    outcome_score = {
+        "sold": 1.00,
+        "showed": 0.85,
+        "appt_set": 0.78,
+        "connected": 0.62,
+        "negotiating": 0.66,
+        "follow_up": 0.45,
+        "left_vm": 0.22,
+        "no_answer": 0.12,
+        "no_show": 0.10,
+        "lost": 0.05,
+    }.get(outcome, 0.40)
+    type_adj = {
+        "call": 0.02,
+        "email": -0.01,
+        "meeting": 0.06,
+        "demo": 0.08,
+        "note": 0.00,
+    }.get(activity_type, 0.0)
+    archetype_adj = {
+        "rockstar": 0.08,
+        "solid_mid": 0.00,
+        "underperformer": -0.08,
+        "new_hire": -0.04,
+    }.get(archetype, 0.0)
+    stage_adj = {
+        "contact": 0.00,
+        "appointment": 0.03,
+        "showroom": 0.05,
+        "negotiation": 0.08,
+        "follow_up": 0.01,
+    }.get(stage, 0.0)
+    jitter = rng.uniform(-0.05, 0.05)
+    return round(_bounded_rate(outcome_score + type_adj + archetype_adj + stage_adj + jitter), 3)
+
+
 def generate_deal_workflow(
     day: datetime,
     deal_number: int,
@@ -464,6 +511,10 @@ def generate_deal_workflow(
     gross_profit_max: int = 6000,
     activities_min: int = 2,
     activities_max: int = 6,
+    contact_rate: float | None = None,
+    appointment_rate: float | None = None,
+    showroom_rate: float | None = None,
+    negotiation_rate: float | None = None,
     scenario: ScenarioConfig | None = None,
 ) -> list[Event]:
     events: list[Event] = []
@@ -486,15 +537,25 @@ def generate_deal_workflow(
         pipeline_advance_rate = arch.pipeline_advance_rate
 
     # Apply scenario multipliers
-    effective_close_rate = base_close_rate * close_rate_mult * sc.close_rate_mult
-    effective_close_rate = min(1.0, max(0.0, effective_close_rate))
-    effective_pipeline_rate = pipeline_advance_rate * sc.pipeline_advance_mult
-    effective_pipeline_rate = min(1.0, max(0.0, effective_pipeline_rate))
+    effective_close_rate = _bounded_rate(base_close_rate * close_rate_mult * sc.close_rate_mult)
+    effective_pipeline_rate = _bounded_rate(pipeline_advance_rate * sc.pipeline_advance_mult)
+
+    # Stage-specific realism rates. These model business milestones while keeping
+    # DB-compatible canonical statuses.
+    base_contact_rate = 0.72 if contact_rate is None else contact_rate
+    base_appointment_rate = 0.55 if appointment_rate is None else appointment_rate
+    base_showroom_rate = 0.65 if showroom_rate is None else showroom_rate
+    base_negotiation_rate = 0.80 if negotiation_rate is None else negotiation_rate
+
+    effective_contact_rate = _bounded_rate(base_contact_rate * (0.85 + 0.30 * activity_mult) * sc.pipeline_advance_mult)
+    effective_appointment_rate = _bounded_rate(base_appointment_rate * effective_pipeline_rate * sc.bdc_appt_set_prob_mult)
+    effective_showroom_rate = _bounded_rate(base_showroom_rate * effective_pipeline_rate)
+    effective_negotiation_rate = _bounded_rate(base_negotiation_rate * effective_pipeline_rate)
 
     # Activities per deal
     raw_activity_count = rng.randint(activities_min, activities_max)
     bdc_mult = sc.bdc_activity_volume_mult if sales_member.role == "bdc" else 1.0
-    activity_count = max(1, round(raw_activity_count * activity_mult * bdc_mult))
+    target_activity_count = max(1, round(raw_activity_count * activity_mult * bdc_mult))
 
     deal_id = stable_uuid("deal", dealership_id, day.strftime("%Y%m%d"), str(deal_number))
     customer_name = f"Customer {deal_number:05d}"
@@ -523,33 +584,16 @@ def generate_deal_workflow(
     )
 
     current_status = "lead"
-    status_ts = created_ts + timedelta(minutes=rng.randint(10, 45))
-    status_path = ["qualified", "proposal", "negotiation"]
+    activity_index = 1
+    activity_count = 0
+    cursor_ts = created_ts + timedelta(minutes=rng.randint(10, 25))
 
-    for next_status in status_path:
-        if rng.random() < effective_pipeline_rate:
-            events.append(
-                make_event(
-                    ts=status_ts,
-                    dealership_id=dealership_id,
-                    member=sales_member,
-                    event_type="deal.status_changed",
-                    sales_rep_id_override=sales_rep_id_override,
-                    payload={
-                        "deal_id": deal_id,
-                        "old_status": current_status,
-                        "new_status": next_status,
-                    },
-                )
-            )
-            current_status = next_status
-            status_ts += timedelta(minutes=rng.randint(15, 90))
-
-    for activity_index in range(1, activity_count + 1):
-        activity_type = rng.choice(ACTIVITY_TYPES)
+    def _log_activity(stage: str, activity_type: str, outcome: str, ts: datetime) -> datetime:
+        nonlocal activity_index, activity_count
         activity_id = stable_uuid("activity", deal_id, str(activity_index))
+        scheduled_ts = ts + timedelta(minutes=rng.randint(5, 45))
+        completed_ts = scheduled_ts + timedelta(minutes=rng.randint(5, 120))
 
-        scheduled_ts = created_ts + timedelta(minutes=rng.randint(20, 360))
         events.append(
             make_event(
                 ts=scheduled_ts,
@@ -561,16 +605,10 @@ def generate_deal_workflow(
                     "activity_id": activity_id,
                     "deal_id": deal_id,
                     "activity_type": activity_type,
-                    "scheduled_for": to_iso(scheduled_ts + timedelta(minutes=rng.randint(5, 180))),
+                    "scheduled_for": to_iso(scheduled_ts + timedelta(minutes=rng.randint(5, 120))),
                 },
             )
         )
-
-        completed_ts = scheduled_ts + timedelta(minutes=rng.randint(5, 220))
-        outcome = rng.choice(ACTIVITY_OUTCOMES)
-        if current_status == "negotiation" and rng.random() < 0.45:
-            outcome = rng.choice(["sold", "negotiating", "follow_up", "lost"])
-
         events.append(
             make_event(
                 ts=completed_ts,
@@ -583,12 +621,130 @@ def generate_deal_workflow(
                     "deal_id": deal_id,
                     "activity_type": activity_type,
                     "outcome": outcome,
+                    "action_score": _activity_score(activity_type, outcome, sales_member.archetype, stage, rng),
+                    "stage_milestone": stage,
                 },
             )
         )
+        activity_index += 1
+        activity_count += 1
+        return completed_ts
 
-    close_won = rng.random() < effective_close_rate
-    close_ts = status_ts + timedelta(minutes=rng.randint(30, 240))
+    # Lead -> Contact milestone (mapped to status lead -> qualified)
+    contact_success = False
+    for _ in range(1 + (1 if rng.random() < 0.35 else 0)):
+        contact_outcome = "connected" if rng.random() < effective_contact_rate else rng.choice(["no_answer", "left_vm", "follow_up"])
+        cursor_ts = _log_activity("contact", rng.choice(["call", "email"]), contact_outcome, cursor_ts)
+        if contact_outcome in {"connected", "appt_set"}:
+            contact_success = True
+            break
+
+    if contact_success:
+        next_status_ts = cursor_ts + timedelta(minutes=rng.randint(5, 45))
+        events.append(
+            make_event(
+                ts=next_status_ts,
+                dealership_id=dealership_id,
+                member=sales_member,
+                event_type="deal.status_changed",
+                sales_rep_id_override=sales_rep_id_override,
+                payload={
+                    "deal_id": deal_id,
+                    "old_status": current_status,
+                    "new_status": "qualified",
+                    "reason": "contact_established",
+                },
+            )
+        )
+        current_status = "qualified"
+        cursor_ts = next_status_ts
+
+    # Contact -> Appointment milestone (mapped to status qualified -> proposal)
+    appointment_set = False
+    if contact_success:
+        if rng.random() < effective_appointment_rate * 0.45:
+            appt_outcome = "appt_set"
+        else:
+            appt_outcome = "follow_up"
+        cursor_ts = _log_activity("appointment", rng.choice(["call", "email"]), appt_outcome, cursor_ts)
+        appointment_set = appt_outcome == "appt_set"
+
+        if not appointment_set and rng.random() < effective_appointment_rate:
+            cursor_ts = _log_activity("appointment", rng.choice(["call", "email"]), "appt_set", cursor_ts)
+            appointment_set = True
+
+    if appointment_set and current_status == "qualified":
+        next_status_ts = cursor_ts + timedelta(minutes=rng.randint(5, 45))
+        events.append(
+            make_event(
+                ts=next_status_ts,
+                dealership_id=dealership_id,
+                member=sales_member,
+                event_type="deal.status_changed",
+                sales_rep_id_override=sales_rep_id_override,
+                payload={
+                    "deal_id": deal_id,
+                    "old_status": current_status,
+                    "new_status": "proposal",
+                    "reason": "appointment_set",
+                },
+            )
+        )
+        current_status = "proposal"
+        cursor_ts = next_status_ts
+
+    # Appointment -> Showroom milestone (mapped to status proposal -> negotiation)
+    showroom_visit = False
+    if appointment_set:
+        showed = rng.random() < effective_showroom_rate
+        showroom_outcome = "showed" if showed else "no_show"
+        cursor_ts = _log_activity("showroom", rng.choice(["meeting", "demo"]), showroom_outcome, cursor_ts)
+        showroom_visit = showed
+
+    if showroom_visit and current_status == "proposal":
+        next_status_ts = cursor_ts + timedelta(minutes=rng.randint(10, 60))
+        events.append(
+            make_event(
+                ts=next_status_ts,
+                dealership_id=dealership_id,
+                member=sales_member,
+                event_type="deal.status_changed",
+                sales_rep_id_override=sales_rep_id_override,
+                payload={
+                    "deal_id": deal_id,
+                    "old_status": current_status,
+                    "new_status": "negotiation",
+                    "reason": "showroom_visit",
+                },
+            )
+        )
+        current_status = "negotiation"
+        cursor_ts = next_status_ts
+
+    # Negotiation actions before closing
+    if current_status == "negotiation" and rng.random() < effective_negotiation_rate:
+        cursor_ts = _log_activity("negotiation", rng.choice(["meeting", "note", "call"]), rng.choice(["negotiating", "follow_up", "sold"]), cursor_ts)
+
+    # Pad to target activity volume so rep activity cadence remains realistic.
+    while activity_count < target_activity_count:
+        cursor_ts = _log_activity(
+            "follow_up",
+            rng.choice(ACTIVITY_TYPES),
+            rng.choice(["follow_up", "connected", "left_vm", "no_answer"]),
+            cursor_ts,
+        )
+
+    if current_status == "negotiation":
+        win_prob = effective_close_rate
+    elif appointment_set:
+        win_prob = effective_close_rate * 0.55
+    elif contact_success:
+        win_prob = effective_close_rate * 0.25
+    else:
+        win_prob = effective_close_rate * 0.08
+
+    close_won = rng.random() < _bounded_rate(win_prob)
+    close_ts = cursor_ts + timedelta(minutes=rng.randint(30, 240))
     if close_won:
         events.append(
             make_event(
@@ -607,6 +763,12 @@ def generate_deal_workflow(
         )
     else:
         base_reasons = ["price", "timing", "credit", "vehicle_unavailable", "no_response"]
+        if not contact_success:
+            base_reasons = ["no_response", "timing", "credit"]
+        elif contact_success and not appointment_set:
+            base_reasons = ["no_response", "timing", "price"]
+        elif appointment_set and not showroom_visit:
+            base_reasons = ["no_show", "timing", "price"]
         if sc.inventory_loss_prob is not None and rng.random() < sc.inventory_loss_prob:
             reason = "vehicle_unavailable"
         else:
@@ -666,6 +828,10 @@ def generate_events(
     gross_profit_max: int = 6000,
     activities_min: int = 2,
     activities_max: int = 6,
+    contact_rate: float | None = None,
+    appointment_rate: float | None = None,
+    showroom_rate: float | None = None,
+    negotiation_rate: float | None = None,
     month_shape: str = "flat",
     scenarios: list[str] | None = None,
     scenario_overrides: dict[str, dict[str, Any]] | None = None,
@@ -725,6 +891,10 @@ def generate_events(
                     gross_profit_max=gross_profit_max,
                     activities_min=activities_min,
                     activities_max=activities_max,
+                    contact_rate=contact_rate,
+                    appointment_rate=appointment_rate,
+                    showroom_rate=showroom_rate,
+                    negotiation_rate=negotiation_rate,
                     scenario=sc,
                 )
             )
