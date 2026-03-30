@@ -459,7 +459,7 @@ def _activity_score(
     outcome: str,
     archetype: str,
     stage: str,
-    rng: random.Random,
+    rng: random.Random, 
 ) -> float:
     outcome_score = {
         "sold": 1.00,
