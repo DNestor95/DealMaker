@@ -561,6 +561,7 @@ def _activity_score(
         "underperformer": -0.08,
         "new_hire": -0.04,
     }.get(archetype, 0.0)
+    # Funnel-stage-aligned keys (PDF §4.2 / source_stage_priors CHECK constraint)
     stage_adj = {
         "contact": 0.00,
         "appointment_set": 0.03,
@@ -1022,6 +1023,7 @@ def generate_events(
         month_key = day.strftime("%Y-%m")
 
         # Emit per-rep quota events at the start of each new month
+        # Quota is in units (cars sold), typically 8–20/month (PDF §6.3)
         if month_key not in months_with_quota:
             months_with_quota.add(month_key)
             for rep_id in quota_rep_ids:
@@ -1069,7 +1071,8 @@ def generate_events(
             )
             events.extend(deal_events)
 
-            # Occasional deal reassignment (~5%) when multiple reps available
+            # Occasional deal reassignment when multiple reps available.
+            # ~5% mirrors typical dealership lead-routing adjustments.
             if rep_pool and len(rep_pool) > 1 and rng.random() < 0.05:
                 deal_id = deal_events[0].payload.get("deal_id")
                 if deal_id and assigned:

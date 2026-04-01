@@ -375,7 +375,7 @@ class TestGeneratedEventsCompliance:
         )
 
     def test_event_type_coverage(self):
-        """All allowed event types must appear in a normal run."""
+        """All six allowed event types must appear in a normal run."""
         team = build_team(salespeople=4, managers=1, bdc_agents=1)
         start = datetime(2026, 3, 1, tzinfo=timezone.utc)
         # Provide multiple rep IDs so deal.reassigned events can be generated
