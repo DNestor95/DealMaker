@@ -202,6 +202,7 @@ DealMaker can seed these via `/stores/<id>/backfill` or `seed_source_stage_prior
 ```
 deal.created
 deal.status_changed
+deal.reassigned
 activity.scheduled
 activity.completed
 rep_quota_updated
@@ -228,6 +229,7 @@ Every event has the envelope:
   "customer_name": "Customer Name",
   "deal_amount":   45000,
   "source":        "internet",
+  "raw_source":    "CarsDotCom_TradeIn",
   "stage":         "lead",
   "gross_profit":  2800
 }
@@ -239,6 +241,29 @@ Every event has the envelope:
   "deal_id":    "<uuid>",
   "old_status": "lead",
   "new_status": "qualified"
+}
+```
+
+When `new_status` is `closed_won`, the payload also includes:
+```json
+{
+  "deal_id":      "<uuid>",
+  "old_status":   "negotiation",
+  "new_status":   "closed_won",
+  "reason":       "sold",
+  "deal_amount":  45000,
+  "gross_profit": 2800,
+  "close_date":   "2026-03-26"
+}
+```
+
+### `deal.reassigned`
+```json
+{
+  "deal_id":     "<uuid>",
+  "from_rep_id": "<uuid>",
+  "to_rep_id":   "<uuid>",
+  "reason":      "round_robin"
 }
 ```
 
@@ -254,9 +279,16 @@ Every event has the envelope:
 ### `activity.completed`
 ```json
 {
-  "activity_id":   "<uuid>",
-  "activity_type": "call",
-  "outcome":       "connected"
+  "activity_id":           "<uuid>",
+  "deal_id":               "<uuid>",
+  "activity_type":         "call",
+  "outcome":               "connected",
+  "contact_quality_score": 0.85,
+  "stage_milestone":       "contact",
+  "response_time_minutes": 12,
+  "follow_up_sequence":    1,
+  "completed_at":          "2026-03-26T14:30:00.000Z",
+  "description":           "Called Customer 00001. Discussed vehicle options."
 }
 ```
 
@@ -282,14 +314,17 @@ Formula: `stable_uuid("deal", dealership_id, YYYYMMDD, str(deal_number))`.
 lead → qualified → proposal → negotiation → closed_won | closed_lost
 ```
 
-### Deal / lead sources
+### Deal / lead sources (canonical)
 ```
-internet  phone  walk_in  referral  third_party
+internet  phone  showroom
 ```
+
+Raw source strings are preserved in `raw_source` (e.g., `"CarsDotCom_TradeIn"`, `"walk_in"`, `"inbound_call"`).
 
 ### Activity types
 ```
-call  email  meeting  demo  note
+call  email  text  voicemail  meeting  appointment  test_drive  demo  note  follow_up
+trade_appraisal  credit_app  pencil_presented  manager_to  delivery  walk_in  lost_reason
 ```
 
 ### Activity outcomes

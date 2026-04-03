@@ -32,7 +32,13 @@ def _ssl_ctx() -> ssl.SSLContext:
 AUTH_ERROR_401 = "Authentication failed (HTTP 401) — check TOPREP_AUTH_TOKEN."
 
 STATUS_VALUES = ["lead", "qualified", "proposal", "negotiation", "closed_won", "closed_lost"]
-ACTIVITY_TYPES = ["call", "email", "meeting", "demo", "note"]
+ACTIVITY_TYPES = [
+    "call", "email", "text", "voicemail", "meeting", "appointment",
+    "test_drive", "demo", "note", "follow_up",
+    # §4.3 recommended types for full dealership coverage
+    "trade_appraisal", "credit_app", "pencil_presented", "manager_to",
+    "delivery", "walk_in", "lost_reason",
+]
 ACTIVITY_OUTCOMES = [
     "connected",
     "no_answer",
@@ -45,7 +51,62 @@ ACTIVITY_OUTCOMES = [
     "negotiating",
     "follow_up",
 ]
-DEAL_SOURCES = ["internet", "phone", "walk_in", "referral", "third_party"]
+DEAL_SOURCES = ["internet", "phone", "showroom"]
+
+# Richer raw-source strings mapped to canonical sources (for audit trail)
+RAW_SOURCES: dict[str, list[str]] = {
+    "internet": [
+        "CarsDotCom_TradeIn", "TrueCar", "OEM_Referral", "Website_Form",
+        "AutoTrader", "Facebook_Ad", "Google_PPC", "Carfax",
+    ],
+    "phone": [
+        "inbound_call", "outbound_prospecting", "service_to_sales", "referral_call",
+    ],
+    "showroom": [
+        "walk_in", "referral", "service_drive", "repeat_customer", "be_back",
+    ],
+}
+
+# Constrains which outcomes each activity type can realistically produce
+ACTIVITY_OUTCOME_MAP: dict[str, list[str]] = {
+    "call": ["connected", "no_answer", "left_vm"],
+    "email": ["connected", "follow_up"],
+    "text": ["connected", "follow_up"],
+    "voicemail": ["left_vm"],
+    "meeting": ["showed", "connected"],
+    "appointment": ["appt_set", "showed", "no_show"],
+    "test_drive": ["showed"],
+    "demo": ["connected", "showed"],
+    "note": ["follow_up"],
+    "follow_up": ["follow_up", "connected"],
+    "trade_appraisal": ["connected", "follow_up"],
+    "credit_app": ["connected", "follow_up"],
+    "pencil_presented": ["negotiating", "follow_up"],
+    "manager_to": ["negotiating", "connected"],
+    "delivery": ["sold"],
+    "walk_in": ["connected", "showed"],
+    "lost_reason": ["lost"],
+}
+
+# Activity types appropriate for each deal-lifecycle stage
+_STAGE_ACTIVITY_TYPES: dict[str, list[str]] = {
+    "contact": ["call", "email", "text", "voicemail"],
+    "appointment_set": ["call", "email", "text", "appointment"],
+    "appointment_show": ["meeting", "test_drive", "demo", "walk_in"],
+    "negotiation": [
+        "meeting", "call", "note", "pencil_presented",
+        "manager_to", "trade_appraisal", "credit_app",
+    ],
+    "follow_up": ["call", "email", "text", "follow_up", "note"],
+}
+
+# Archetype-aware speed-to-lead response time ranges (minutes)
+_RESPONSE_TIME_RANGES: dict[str, tuple[int, int]] = {
+    "rockstar": (5, 15),
+    "solid_mid": (10, 30),
+    "underperformer": (30, 120),
+    "new_hire": (15, 45),
+}
 
 # ---------------------------------------------------------------------------
 # TopRep API contract — source of truth: REALTIME_DATA_INGEST_REFERENCE.md
@@ -54,6 +115,7 @@ DEAL_SOURCES = ["internet", "phone", "walk_in", "referral", "third_party"]
 ALLOWED_EVENT_TYPES: list[str] = [
     "deal.created",
     "deal.status_changed",
+    "deal.reassigned",
     "activity.scheduled",
     "activity.completed",
     "rep_quota_updated",
@@ -63,6 +125,7 @@ ALLOWED_EVENT_TYPES: list[str] = [
 REQUIRED_PAYLOAD_KEYS: dict[str, list[str]] = {
     "deal.created":        ["deal_id", "customer_name", "deal_amount", "source"],
     "deal.status_changed": ["deal_id", "old_status", "new_status"],
+    "deal.reassigned":     ["deal_id", "from_rep_id", "to_rep_id"],
     "activity.scheduled":  ["activity_id", "activity_type", "scheduled_for"],
     "activity.completed":  ["activity_id", "activity_type", "outcome"],
     "rep_quota_updated":   ["month", "old_quota", "new_quota"],
@@ -476,9 +539,21 @@ def _activity_score(
     type_adj = {
         "call": 0.02,
         "email": -0.01,
+        "text": 0.01,
+        "voicemail": -0.02,
         "meeting": 0.06,
+        "appointment": 0.05,
+        "test_drive": 0.10,
         "demo": 0.08,
         "note": 0.00,
+        "follow_up": 0.00,
+        "trade_appraisal": 0.06,
+        "credit_app": 0.07,
+        "pencil_presented": 0.08,
+        "manager_to": 0.06,
+        "delivery": 0.10,
+        "walk_in": 0.04,
+        "lost_reason": 0.00,
     }.get(activity_type, 0.0)
     archetype_adj = {
         "rockstar": 0.08,
@@ -486,15 +561,59 @@ def _activity_score(
         "underperformer": -0.08,
         "new_hire": -0.04,
     }.get(archetype, 0.0)
+    # Funnel-stage-aligned keys (PDF §4.2 / source_stage_priors CHECK constraint)
     stage_adj = {
         "contact": 0.00,
-        "appointment": 0.03,
-        "showroom": 0.05,
+        "appointment_set": 0.03,
+        "appointment_show": 0.05,
         "negotiation": 0.08,
         "follow_up": 0.01,
     }.get(stage, 0.0)
     jitter = rng.uniform(-0.05, 0.05)
     return round(_bounded_rate(outcome_score + type_adj + archetype_adj + stage_adj + jitter), 3)
+
+
+def _generate_description(
+    activity_type: str,
+    outcome: str,
+    customer_name: str,
+    rng: random.Random,
+) -> str:
+    """Generate a realistic human-readable activity description."""
+    _TYPE_VERBS: dict[str, str] = {
+        "call": "Called",
+        "email": "Emailed",
+        "text": "Texted",
+        "voicemail": "Left voicemail for",
+        "meeting": "Met with",
+        "appointment": "Appointment with",
+        "test_drive": "Test drive with",
+        "demo": "Vehicle demo for",
+        "note": "Internal note on",
+        "follow_up": "Follow-up with",
+        "trade_appraisal": "Trade appraisal for",
+        "credit_app": "Credit application for",
+        "pencil_presented": "Payment worksheet presented to",
+        "manager_to": "Manager T.O. with",
+        "delivery": "Vehicle delivery to",
+        "walk_in": "Walk-in visit from",
+        "lost_reason": "Lost reason documented for",
+    }
+    _OUTCOME_NOTES: dict[str, list[str]] = {
+        "connected": ["Discussed vehicle options.", "Customer interested, will follow up."],
+        "no_answer": ["No answer, will retry.", "No pickup."],
+        "left_vm": ["Left message requesting callback.", "Voicemail left."],
+        "appt_set": ["Appointment scheduled.", "Confirmed visit date."],
+        "showed": ["Customer arrived.", "Showed up on time."],
+        "no_show": ["Customer did not show.", "No-show, rescheduling."],
+        "sold": ["Deal closed.", "Completed sale."],
+        "lost": ["Deal lost.", "Customer chose another option."],
+        "negotiating": ["Numbers presented.", "Working the deal."],
+        "follow_up": ["Needs more time.", "Will follow up next week."],
+    }
+    verb = _TYPE_VERBS.get(activity_type, activity_type.replace("_", " ").title())
+    note = rng.choice(_OUTCOME_NOTES.get(outcome, [outcome.replace("_", " ")]))
+    return f"{verb} {customer_name}. {note}"
 
 
 def generate_deal_workflow(
@@ -563,7 +682,15 @@ def generate_deal_workflow(
     effective_amount_min = deal_amount_min + sc.deal_amount_floor_bump
     # Ensure min < max to avoid randint errors when scenario bumps floor above configured max
     safe_amount_max = max(effective_amount_min + 1, deal_amount_max)
-    deal_amount = rng.randint(max(1, effective_amount_min), safe_amount_max)
+
+    source = rng.choice(DEAL_SOURCES)
+    raw_source = rng.choice(RAW_SOURCES[source])
+
+    # Allow $0 deals for early-stage internet leads (~15%)
+    if source == "internet" and rng.random() < 0.15:
+        deal_amount = 0
+    else:
+        deal_amount = rng.randint(max(1, effective_amount_min), safe_amount_max)
     gross_profit = rng.randint(gross_profit_min, max(gross_profit_min + 1, gross_profit_max))
 
     events.append(
@@ -578,7 +705,9 @@ def generate_deal_workflow(
                 "customer_name": customer_name,
                 "deal_amount": deal_amount,
                 "gross_profit": gross_profit,
-                "source": rng.choice(DEAL_SOURCES),
+                "source": source,
+                "raw_source": raw_source,
+                "stage": "lead",
             },
         )
     )
@@ -586,13 +715,18 @@ def generate_deal_workflow(
     current_status = "lead"
     activity_index = 1
     activity_count = 0
-    cursor_ts = created_ts + timedelta(minutes=rng.randint(10, 25))
+    # Archetype-aware speed-to-lead for first activity gap
+    response_range = _RESPONSE_TIME_RANGES.get(sales_member.archetype, (10, 30))
+    cursor_ts = created_ts + timedelta(minutes=rng.randint(*response_range))
 
     def _log_activity(stage: str, activity_type: str, outcome: str, ts: datetime) -> datetime:
         nonlocal activity_index, activity_count
         activity_id = stable_uuid("activity", deal_id, str(activity_index))
         scheduled_ts = ts + timedelta(minutes=rng.randint(5, 45))
         completed_ts = scheduled_ts + timedelta(minutes=rng.randint(5, 120))
+
+        # Response time: minutes since deal creation
+        response_minutes = int((completed_ts - created_ts).total_seconds() / 60)
 
         events.append(
             make_event(
@@ -621,8 +755,12 @@ def generate_deal_workflow(
                     "deal_id": deal_id,
                     "activity_type": activity_type,
                     "outcome": outcome,
-                    "action_score": _activity_score(activity_type, outcome, sales_member.archetype, stage, rng),
+                    "contact_quality_score": _activity_score(activity_type, outcome, sales_member.archetype, stage, rng),
                     "stage_milestone": stage,
+                    "response_time_minutes": response_minutes,
+                    "follow_up_sequence": activity_index,
+                    "completed_at": to_iso(completed_ts),
+                    "description": _generate_description(activity_type, outcome, customer_name, rng),
                 },
             )
         )
@@ -633,8 +771,14 @@ def generate_deal_workflow(
     # Lead -> Contact milestone (mapped to status lead -> qualified)
     contact_success = False
     for _ in range(1 + (1 if rng.random() < 0.35 else 0)):
-        contact_outcome = "connected" if rng.random() < effective_contact_rate else rng.choice(["no_answer", "left_vm", "follow_up"])
-        cursor_ts = _log_activity("contact", rng.choice(["call", "email"]), contact_outcome, cursor_ts)
+        contact_type = rng.choice(_STAGE_ACTIVITY_TYPES["contact"])
+        if rng.random() < effective_contact_rate:
+            contact_outcome = "connected"
+        else:
+            # Pick a non-success outcome valid for the chosen activity type
+            valid_outcomes = [o for o in ACTIVITY_OUTCOME_MAP.get(contact_type, ["no_answer"]) if o not in ("connected",)]
+            contact_outcome = rng.choice(valid_outcomes) if valid_outcomes else "no_answer"
+        cursor_ts = _log_activity("contact", contact_type, contact_outcome, cursor_ts)
         if contact_outcome in {"connected", "appt_set"}:
             contact_success = True
             break
@@ -662,15 +806,17 @@ def generate_deal_workflow(
     # Contact -> Appointment milestone (mapped to status qualified -> proposal)
     appointment_set = False
     if contact_success:
+        appt_type = rng.choice(_STAGE_ACTIVITY_TYPES["appointment_set"])
         if rng.random() < effective_appointment_rate * 0.45:
             appt_outcome = "appt_set"
         else:
             appt_outcome = "follow_up"
-        cursor_ts = _log_activity("appointment", rng.choice(["call", "email"]), appt_outcome, cursor_ts)
+        cursor_ts = _log_activity("appointment_set", appt_type, appt_outcome, cursor_ts)
         appointment_set = appt_outcome == "appt_set"
 
         if not appointment_set and rng.random() < effective_appointment_rate:
-            cursor_ts = _log_activity("appointment", rng.choice(["call", "email"]), "appt_set", cursor_ts)
+            appt_type = rng.choice(_STAGE_ACTIVITY_TYPES["appointment_set"])
+            cursor_ts = _log_activity("appointment_set", appt_type, "appt_set", cursor_ts)
             appointment_set = True
 
     if appointment_set and current_status == "qualified":
@@ -698,7 +844,8 @@ def generate_deal_workflow(
     if appointment_set:
         showed = rng.random() < effective_showroom_rate
         showroom_outcome = "showed" if showed else "no_show"
-        cursor_ts = _log_activity("showroom", rng.choice(["meeting", "demo"]), showroom_outcome, cursor_ts)
+        showroom_type = rng.choice(_STAGE_ACTIVITY_TYPES["appointment_show"])
+        cursor_ts = _log_activity("appointment_show", showroom_type, showroom_outcome, cursor_ts)
         showroom_visit = showed
 
     if showroom_visit and current_status == "proposal":
@@ -723,14 +870,18 @@ def generate_deal_workflow(
 
     # Negotiation actions before closing
     if current_status == "negotiation" and rng.random() < effective_negotiation_rate:
-        cursor_ts = _log_activity("negotiation", rng.choice(["meeting", "note", "call"]), rng.choice(["negotiating", "follow_up", "sold"]), cursor_ts)
+        neg_type = rng.choice(_STAGE_ACTIVITY_TYPES["negotiation"])
+        neg_outcome = rng.choice(ACTIVITY_OUTCOME_MAP.get(neg_type, ["negotiating"]))
+        cursor_ts = _log_activity("negotiation", neg_type, neg_outcome, cursor_ts)
 
     # Pad to target activity volume so rep activity cadence remains realistic.
     while activity_count < target_activity_count:
+        pad_type = rng.choice(_STAGE_ACTIVITY_TYPES["follow_up"])
+        pad_outcome = rng.choice(ACTIVITY_OUTCOME_MAP.get(pad_type, ["follow_up"]))
         cursor_ts = _log_activity(
             "follow_up",
-            rng.choice(ACTIVITY_TYPES),
-            rng.choice(["follow_up", "connected", "left_vm", "no_answer"]),
+            pad_type,
+            pad_outcome,
             cursor_ts,
         )
 
@@ -758,9 +909,15 @@ def generate_deal_workflow(
                     "old_status": current_status,
                     "new_status": "closed_won",
                     "reason": "sold",
+                    "deal_amount": deal_amount,
+                    "gross_profit": gross_profit,
+                    "close_date": close_ts.strftime("%Y-%m-%d"),
                 },
             )
         )
+        # Post-sale: delivery activity
+        delivery_ts = close_ts + timedelta(minutes=rng.randint(60, 480))
+        _log_activity("follow_up", "delivery", "sold", delivery_ts)
     else:
         base_reasons = ["price", "timing", "credit", "vehicle_unavailable", "no_response"]
         if not contact_success:
@@ -788,26 +945,9 @@ def generate_deal_workflow(
                 },
             )
         )
-
-    if sc.manager_events_enabled and rng.random() < 0.06:
-        month = day.strftime("%Y-%m")
-        old_quota = rng.randint(30, 80)
-        new_quota = max(1, old_quota + rng.randint(-10, 15))
-        events.append(
-            make_event(
-                ts=created_ts + timedelta(minutes=rng.randint(1, 30)),
-                dealership_id=dealership_id,
-                member=manager_member,
-                event_type="rep_quota_updated",
-                sales_rep_id_override=sales_rep_id_override,
-                payload={
-                    "month": month,
-                    "old_quota": old_quota,
-                    "new_quota": new_quota,
-                    "reason": rng.choice(["seasonality", "management_adjustment", "performance_retarget"]),
-                },
-            )
-        )
+        # Post-loss: document lost reason
+        lost_ts = close_ts + timedelta(minutes=rng.randint(5, 60))
+        _log_activity("follow_up", "lost_reason", "lost", lost_ts)
 
     return events
 
@@ -854,6 +994,13 @@ def generate_events(
     elif sales_rep_id_override:
         rep_pool = [sales_rep_id_override]
 
+    # Determine all rep UUIDs for per-rep quota emission
+    quota_rep_ids: list[str] = []
+    if rep_pool:
+        quota_rep_ids = list(rep_pool)
+    else:
+        quota_rep_ids = [sales_rep_uuid(dealership_id, m) for m in team if m.role == "sales"]
+
     # Pre-compute per-day weights for the month-shape distribution
     # We normalise so total_weighted_days * normalised_weight == days
     day_weights: list[float] = []
@@ -868,36 +1015,88 @@ def generate_events(
     total_weight = sum(day_weights) or 1.0
     total_leads_target = effective_daily_leads * days
 
+    # Track which months have had quota events emitted
+    months_with_quota: set[str] = set()
+
     for day_offset in range(days):
         day = start_date + timedelta(days=day_offset)
+        month_key = day.strftime("%Y-%m")
+
+        # Emit per-rep quota events at the start of each new month
+        # Quota is in units (cars sold), typically 8–20/month (PDF §6.3)
+        if month_key not in months_with_quota:
+            months_with_quota.add(month_key)
+            for rep_id in quota_rep_ids:
+                quota = rng.randint(8, 20)
+                old_quota = max(0, quota + rng.randint(-3, 0))
+                events.append(
+                    Event(
+                        sales_rep_id=rep_id,
+                        type="rep_quota_updated",
+                        payload={
+                            "month": month_key,
+                            "old_quota": old_quota,
+                            "new_quota": quota,
+                            "reason": rng.choice(["seasonality", "management_adjustment", "performance_retarget"]),
+                        },
+                        created_at=to_iso(day.replace(hour=8, minute=0, second=0, microsecond=0)),
+                    )
+                )
+
         # Scale daily leads by shape weight
         scaled_mean = total_leads_target * day_weights[day_offset] / total_weight
         leads_today = max(1, int(rng.gauss(scaled_mean, max(2.0, scaled_mean * 0.25))))
         for _ in range(leads_today):
             # Round-robin: each new deal goes to the next rep in the pool
             assigned = rep_pool[(deal_counter - 1) % len(rep_pool)] if rep_pool else None
-            events.extend(
-                generate_deal_workflow(
-                    day=day,
-                    deal_number=deal_counter,
-                    team=team,
-                    dealership_id=dealership_id,
-                    rng=rng,
-                    sales_rep_id_override=assigned,
-                    base_close_rate=base_close_rate,
-                    deal_amount_min=deal_amount_min,
-                    deal_amount_max=deal_amount_max,
-                    gross_profit_min=gross_profit_min,
-                    gross_profit_max=gross_profit_max,
-                    activities_min=activities_min,
-                    activities_max=activities_max,
-                    contact_rate=contact_rate,
-                    appointment_rate=appointment_rate,
-                    showroom_rate=showroom_rate,
-                    negotiation_rate=negotiation_rate,
-                    scenario=sc,
-                )
+            deal_events = generate_deal_workflow(
+                day=day,
+                deal_number=deal_counter,
+                team=team,
+                dealership_id=dealership_id,
+                rng=rng,
+                sales_rep_id_override=assigned,
+                base_close_rate=base_close_rate,
+                deal_amount_min=deal_amount_min,
+                deal_amount_max=deal_amount_max,
+                gross_profit_min=gross_profit_min,
+                gross_profit_max=gross_profit_max,
+                activities_min=activities_min,
+                activities_max=activities_max,
+                contact_rate=contact_rate,
+                appointment_rate=appointment_rate,
+                showroom_rate=showroom_rate,
+                negotiation_rate=negotiation_rate,
+                scenario=sc,
             )
+            events.extend(deal_events)
+
+            # Occasional deal reassignment when multiple reps available.
+            # ~5% mirrors typical dealership lead-routing adjustments.
+            if rep_pool and len(rep_pool) > 1 and rng.random() < 0.05:
+                deal_id = deal_events[0].payload.get("deal_id")
+                if deal_id and assigned:
+                    to_rep = rng.choice([r for r in rep_pool if r != assigned])
+                    reassign_ts = day.replace(
+                        hour=rng.randint(8, 18),
+                        minute=rng.randint(0, 59),
+                        second=0,
+                        microsecond=0,
+                    )
+                    events.append(
+                        Event(
+                            sales_rep_id=to_rep,
+                            type="deal.reassigned",
+                            payload={
+                                "deal_id": deal_id,
+                                "from_rep_id": assigned,
+                                "to_rep_id": to_rep,
+                                "reason": rng.choice(["round_robin", "manual_reassignment", "coverage"]),
+                            },
+                            created_at=to_iso(reassign_ts),
+                        )
+                    )
+
             deal_counter += 1
 
     events.sort(key=lambda event: event.created_at)
@@ -956,6 +1155,7 @@ def post_event_to_api(
 _EVENT_TYPE_TO_ACTIVITY_TYPE: dict[str, str] = {
     "deal.created": "note",
     "deal.status_changed": "note",
+    "deal.reassigned": "note",
     "activity.scheduled": "",   # use payload.activity_type
     "activity.completed": "",   # use payload.activity_type
     "rep_quota_updated": "note",
@@ -969,18 +1169,20 @@ def event_to_action(event: Event) -> dict[str, Any]:
     mapped = _EVENT_TYPE_TO_ACTIVITY_TYPE.get(event.type, "note")
     activity_type = payload.get("activity_type") or mapped or "note"
 
-    # Build a human-readable description from available context
-    outcome = payload.get("outcome")
-    new_status = payload.get("new_status")
-    source = payload.get("source")
-    if outcome:
-        description = outcome
-    elif new_status:
-        description = f"Status changed to {new_status}"
-    elif source:
-        description = f"Lead from {source}"
-    else:
-        description = event.type
+    # Prefer payload description (enriched); fall back to generated description
+    description = payload.get("description")
+    if not description:
+        outcome = payload.get("outcome")
+        new_status = payload.get("new_status")
+        source = payload.get("source")
+        if outcome:
+            description = outcome
+        elif new_status:
+            description = f"Status changed to {new_status}"
+        elif source:
+            description = f"Lead from {source}"
+        else:
+            description = event.type
 
     row: dict[str, Any] = {
         # Edge function validation expects these names
@@ -994,17 +1196,25 @@ def event_to_action(event: Event) -> dict[str, Any]:
         "created_at": event.created_at,
     }
 
-    # Include scheduled_at / completed_at only when present
+    # Include analytics fields when present
     if payload.get("scheduled_at"):
         row["scheduled_at"] = payload["scheduled_at"]
     if payload.get("completed_at"):
         row["completed_at"] = payload["completed_at"]
+    if payload.get("outcome"):
+        row["outcome"] = payload["outcome"]
+    if payload.get("contact_quality_score") is not None:
+        row["contact_quality_score"] = payload["contact_quality_score"]
+    if payload.get("response_time_minutes") is not None:
+        row["response_time_minutes"] = payload["response_time_minutes"]
+    if payload.get("follow_up_sequence") is not None:
+        row["follow_up_sequence"] = payload["follow_up_sequence"]
 
     return row
 
 
 def events_to_deals(events: list[Event]) -> list[dict[str, Any]]:
-    """Build deal upsert rows from deal.created and deal.status_changed events."""
+    """Build deal upsert rows from deal.created, deal.status_changed, and deal.reassigned events."""
     deals: dict[str, dict[str, Any]] = {}
 
     for event in events:
@@ -1026,10 +1236,21 @@ def events_to_deals(events: list[Event]) -> list[dict[str, Any]]:
                 "updated_at": event.created_at,
             }
         elif event.type == "deal.status_changed" and deal_id in deals:
-            deals[deal_id]["status"] = p.get("new_status", deals[deal_id]["status"])
+            new_status = p.get("new_status", deals[deal_id]["status"])
+            deals[deal_id]["status"] = new_status
             deals[deal_id]["updated_at"] = event.created_at
-            if p.get("new_status") in ("closed_won", "closed_lost"):
+            if new_status == "closed_won":
+                # Pick up final financials from close payload
+                if p.get("deal_amount") is not None:
+                    deals[deal_id]["deal_amount"] = p["deal_amount"]
+                if p.get("gross_profit") is not None:
+                    deals[deal_id]["gross_profit"] = p["gross_profit"]
+                deals[deal_id]["close_date"] = p.get("close_date") or event.created_at[:10]
+            elif new_status == "closed_lost":
                 deals[deal_id]["close_date"] = event.created_at[:10]
+        elif event.type == "deal.reassigned" and deal_id in deals:
+            deals[deal_id]["sales_rep_id"] = event.sales_rep_id
+            deals[deal_id]["updated_at"] = event.created_at
 
     return list(deals.values())
 

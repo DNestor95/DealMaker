@@ -1,0 +1,588 @@
+Total Pages: 15
+
+====================================================================================================
+
+
+PAGE 1:
+====================================================================================================
+TopRep System Analysis
+Deal Flow, Activity Model, and Analytics Architecture
+Prepared for:  Engineering, Product Design, and AI Agent Teams
+Date:  April 1, 2026
+Version:  1.0
+Classification:  Internal — Implementation-Ready Reference
+1. Executive Summary
+TopRep is a dealership sales performance and analytics platform built on an event-sourced architecture
+with Bayesian Monte Carlo forecasting. The system ingests deals and activities via an append-only event
+log ( events table), materializes them into queryable tables ( deals, activities ), aggregates monthly
+statistics ( rep_month_stats ), and runs 10,000-simulation Monte Carlo forecasts per rep per month.
+The platform currently supports: -  6 pipeline stages:  lead → qualified → proposal → negotiation →
+closed_won → closed_lost -  11 activity types:  call, email, text, sms, voicemail, meeting, appointment,
+test_drive, demo, note, follow_up -  10 activity outcomes:  connected, no_answer, left_vm, appt_set,
+showed,  no_show,  sold,  lost,  negotiating,  follow_up  -  3  canonical  lead  sources:  internet,  phone,
+showroom
+Analytics are computed via a pure-function domain layer with Bayesian shrinkage, anomaly detection,
+trust scoring, and scenario analysis.
+What exists today:  Event logging, deal/activity materialization, Bayesian forecast engine, rep analytics
+with  source  weights  and  expected-unit  calculations,  manager  dashboards  with  coaching  intelligence,
+accountability alerts, leaderboard, pipeline Kanban board, and mobile apps.
+What  this  document  addresses:  How  to  extend  and  operationalize  the  system  for  full  dealership
+workflows — covering deal intake, lifecycle, activity taxonomy, UI presentation, analytics usage, data
+modeling, quality control, and design principles.
+2. Step-by-Step Deal Intake Flow
+2.1 Lead Source Types
+TopRep must ingest deals from these dealership-standard sources:
+
+
+
+
+PAGE 2:
+====================================================================================================
+Source
+CategoryCanonical
+SourceExamples
+Internet internet Website form, third-party leads (Carfax, TrueCar, Cars.com, OEM referrals),
+trade-in/value requests, payment estimate leads
+Phone phone Inbound phone call, outbound prospecting call, service-to-sales referral
+Showroom showroom Walk-in, service drive opportunity, repeat customer visit, referral walk-in
+TopRep currently normalizes all sources into three canonical buckets ( internet ,  phone,  showroom )
+while preserving the raw source string in  raw_source  (per Blueprint Red Flag 7). This is correct and
+should remain the strategy.
+2.2 Raw Source Data Received
+Depending on origin, TopRep may receive: -  Internet leads:  Name, email, phone, vehicle of interest,
+trade-in info, form submission timestamp, referring site (e.g., "CarsDotCom"), OEM program code - Phone
+ups:  Caller ID, call timestamp, call duration, recorded call reference, notes from receptionist - Walk-ins:
+Greeter-entered name, vehicle interest, "be-back" flag, referral source - CRM imports:  CSV with mixed
+fields — customer name, contact info, deal amount, source, status, rep assignment - API integrations:
+eLeads-format JSON with lead ID, customer details, vehicle interest, submission timestamp
+2.3 Minimum Fields to Create a Deal
+Based on the current DealCreatedPayload  schema and create_deal  copilot action:
+Field Required? Source
+sales_rep_id Yes Assigned at intake or by round-robin
+customer_name Yes From lead data (min 1 character)
+deal_amount Yes Estimated or $0 for unknowns
+deal_id Yes System-generated UUID
+source Recommended Canonical: internet / phone / showroom
+raw_source Recommended Original source string for audit
+gross_profit Optional Estimated or omitted
+
+
+
+
+PAGE 3:
+====================================================================================================
+2.4 Step-by-Step Intake Flow
+Step1:RECEIVE
+→Leadarrives viaAPI(/api/events),CSVimport(/imports),
+orcopilot action(create_deal )
+→Rawdatacaptured withoriginal fieldnames
+Step2:VALIDATE
+→Zodschemavalidation (DealCreatedPayload orcreate_deal params)
+→Rejectifmissing customer_name orsales_rep_id
+→Flagincomplete records (nophone,noemail)formanualreview
+Step3:NORMALIZE SOURCE
+→Mapraw_source stringtocanonical source
+(internet |phone|showroom )
+→Preserve raw_source inpayload foraudittrail
+→Example:"CarsDotCom_TradeIn" →
+source:"internet" ,raw_source :"CarsDotCom_TradeIn"
+Step4:DETECTDUPLICATES
+→Checkexisting dealsby(customer_name ,sales_rep_id ,source)
+within7-daywindow
+→Ifmatchfound:emitlead.duplicate_detected event
+withconfidence score
+→Action:"flagged" formanualreview,
+"auto_merged" ifconfidence >0.9,
+"dismissed" if<0.5
+Step5:RESOLVE CUSTOMER IDENTITY
+→Matchonnormalized phonenumberoremail(whenavailable )
+→Linktoexisting customer recordiffound;
+createnewifnot
+→Flagrepeatcustomers forpriority treatment
+Step6:ASSIGNREPOWNERSHIP
+→Ifrepspecified inleaddata:assigndirectly
+→Ifunassigned :round-robinwithinstorebysourcetype
+→Internet leads:routetointernet salesteamorbyrotation
+→Walk-ins:assigned byfloorlog/greeter assignment
+→Phoneups:assigned torepwhotookthecall
+→Emitdeal.created eventwithassigned sales_rep_id
+Step7:MATERIALIZE
+→logEvent ()validates andinserts intoeventstable
+(append-only)
+→Side-effect:upsertDeal ()creates recordindealstable
+(status='lead')
+→Side-effect:enqueueRepMonthForecast ()queuesforecast
+recomputation
+→Dealisnowvisible inpipeline Kanbanboard
+Step8:HANDLELOW-QUALITY RECORDS
+→Ifdeal_amount =0andnosource:flagas"needs_enrichment"
+→Ifcustomer_name appears auto-generated ortest:
+flagforreview
+→DoNOTreject—storeinsystembutexclude fromanalytics
+untilenriched
+→Tracktime-to-first-contact asspeed-to-leadmetric
+regardless
+
+
+
+
+PAGE 4:
+====================================================================================================
+2.5 Lead vs. Opportunity vs. Deal Distinction
+In TopRep's current model, these are stages of the same entity  (the deals table record), not separate
+objects:
+Term TopRep Status Meaning
+Lead status = 'lead' Initial intake, no rep contact yet
+Opportunity status ∈ ['qualified', 'proposal',
+'negotiation']Rep has engaged; customer has
+potential
+Deal status ∈ ['closed_won', 'closed_lost'] Resolved outcome
+This is the correct design for a dealership tool. Dealership salespeople don't think in "lead vs. opportunity"
+CRM jargon — they think in "ups" (new customer encounters) that become "deals" (working a buyer) that
+either sell or get lost.
+3. Step-by-Step Deal Lifecycle
+3.1 Pipeline Stages (Recommended Dealership Model)
+TopRep currently uses six pipeline stages. For full dealership coverage, the recommended expanded
+pipeline maps to these stages:
+Stage Current Status What It Means
+New Lead lead Customer record created, no rep action yet
+Attempted Contact lead (with activity) Rep tried to reach customer, no conversation
+Contacted qualified Two-way conversation achieved
+Appointment Set qualified  (with appt) Customer committed to visit
+Appointment Shown proposal Customer physically arrived
+Working / Needs Analysis proposal Active in-store engagement
+Demo / Test Drive proposal  (with test_drive) Customer has driven a vehicle
+Negotiation negotiation Numbers presented, structure being worked
+Sold closed_won Deal completed
+Lost closed_lost Deal did not close
+On Hold / Follow-Up Any status with follow_up Customer not ready but has future potential
+3.2 Stage Details
+New Lead  — Entry events: deal.created  event. Data captured: customer_name, source, raw_source,
+deal_amount, arrival timestamp. Key metrics: Speed-to-lead (time to first activity), lead volume by source.
+Max duration: 30 minutes  (internet), same-day  (phone/walk-in) — flag if exceeded.
+
+
+
+
+PAGE 5:
+====================================================================================================
+Attempted Contact  — Entry events: activity.completed  with outcome no_answer  or left_vm . Data
+captured: Call attempts, voicemails left, texts/emails sent, attempt timestamps. Key metrics: Attempt
+count, attempt cadence, channel mix. Max duration: 48 hours  — escalate if no contact after 5 attempts.
+Contacted  — Entry events: activity.completed  with outcome connected . Data captured: Connection
+timestamp, customer needs identified, vehicle interest. Key metrics: Contact rate, response time, time-to-
+contact. Max duration: 3 days  — needs appointment or follow-up plan.
+Appointment  Set  —  Entry  events:  activity.completed  with  outcome  appt_set .  Data  captured:
+Appointment date/time, confirmed status. Key metrics: Appointment set rate, appointment-to-contact ratio.
+Max duration: 5 days  — confirm 24h before, flag unconfirmed.
+Appointment Shown  — Entry events:  activity.completed  with outcome  showed. Data captured:
+Show timestamp, vehicle preferences, trade-in details. Key metrics: Show rate, no-show rate, time from
+set to show. Max duration: Same day  — immediate progression expected.
+Working / Needs Analysis  — Entry events: activity.completed  with type meeting . Data captured:
+Customer needs, vehicle matches, budget range, credit situation. Key metrics: Time in stage, activity
+density. Max duration: 2 days  — if still working without demo, flag.
+Demo  /  Test  Drive  —  Entry  events:  activity.completed  with  type  test_drive  or  demo.  Data
+captured: Vehicle driven, customer reaction, trade appraisal started. Key metrics: Demo rate, demo-to-
+negotiation conversion. Max duration: 2 days  — should lead to write-up.
+Negotiation  — Entry events: deal.status_changed  to negotiation . Data captured: Pencil presented,
+payment  terms,  trade  value,  financing  options.  Key  metrics:  Negotiation  close  rate,  avg  negotiation
+duration, gross per deal. Max duration: 3 days  — flag "stuck negotiations" in accountability.
+Sold  — Entry events: deal.status_changed  to closed_won . Data captured: Final deal amount, gross
+profit, close date, financing type. Key metrics: Close rate, avg gross, days-to-sale, revenue. Terminal
+stage.
+Lost  — Entry events: deal.status_changed  to closed_lost . Data captured: Lost reason (price, credit,
+not ready, went elsewhere, no vehicle). Key metrics: Lost reason distribution, save attempts, stage-at-loss.
+Terminal stage (can reopen).
+On Hold / Follow-Up  — Entry events: activity.scheduled  with type follow_up . Data captured: Next
+follow-up date, reason for hold, re-engagement plan. Key metrics: Follow-up compliance rate, "be-back"
+conversion rate. Max duration: 30 days  — auto-flag stale follow-ups.
+3.3 Stage Transition Rules
+The current system uses  deal.status_changed  events and  activity.completed  outcomes to track
+progression. The funnel module ( lib/domain/funnel/index.ts ) correctly maps activity outcomes to
+funnel stages rather than relying solely on pipeline status:
+activity.completed + outcome='connected'     → funnel: contact
+activity.completed + outcome='appt_set'      → funnel: appointment_set
+activity.completed + outcome='showed'        → funnel: appointment_show
+deal.status_changed + new_status='closed_won' → funnel: sold
+This dual-track system (pipeline status for UI, funnel stages for analytics) is the correct design.
+
+
+
+
+PAGE 6:
+====================================================================================================
+3.4 Stage Duration Thresholds and Alerts
+The accountability system ( /admin/accountability ) already implements several alerts:
+Alert Implemented? Threshold
+Stale Internet Leads ✅ Yes
+ No activity > 48 hours
+Speed-to-Lead Violation ✅ Yes
+ Internet lead not contacted in 30 min
+Missed Follow-Ups ✅ Yes
+ Overdue scheduled activities
+Unconfirmed Appointments ✅ Yes
+ Appointment within 24h, unconfirmed
+Open Deals No Activity ✅ Yes
+ No activity in 48 hours
+Negotiations Over 3 Days ✅ Yes
+ Negotiation status > 3 days
+Below Activity Threshold ✅ Yes
+ < 3 activities today per rep
+4. Activity and Interaction Model
+4.1 Activity Types — Full Taxonomy
+TopRep currently supports 11 activity types and 10 outcomes. Below is the complete activity model:
+
+
+
+
+PAGE 7:
+====================================================================================================
+Activity
+TypeWhat It Is Why It MattersAffects
+Pipeline?Counts as
+Activity?Affects
+Contact
+Rate?Dashboard
+Visible?
+call Phone call (in/
+out)Primary contact
+methodYes (if
+connected)Yes Yes Yes — high-
+value
+email Email sent Document trail Only if reply Yes Only if
+connectedYes —
+medium
+text/sms Text message Fastest
+response
+channelOnly if
+conversationYes Only if
+connectedYes —
+medium
+voicemail VM left Shows attempt,
+not
+engagementNo Yes
+(attempt)No Yes — low
+meeting In-person/
+videoHigh-value face
+timeYes (if
+showed)Yes Yes Yes — high
+appointment Scheduled
+meetingPipeline
+progressionYes —
+appt_setYes Yes Yes — high
+test_drive Customer
+drove vehicleStrongest
+buying signalYes —
+implies
+showedYes Yes Yes —
+highest
+demo Vehicle
+presentationPre-drive
+engagementYes — active
+workingYes Yes Yes — high
+note Internal
+observationContext, not
+contactNo No No Yes —
+timeline
+follow_up Scheduled
+future contactPipeline health No — intent
+onlyYes (when
+done)No Yes —
+planning
+4.2 Activity Outcomes
+Outcome Meaning Funnel Stage Counts as Contact?
+connected Two-way conversation contact Yes
+no_answer Call placed, no pickup none No — attempt only
+left_vm Voicemail left none No — attempt only
+appt_set Appointment booked appointment_set Yes (implies contact)
+showed Customer appeared appointment_show Yes
+no_show Customer missed appt none (negative) No
+sold Deal closed sold Yes
+lost Deal lost none (terminal) Yes (contact happened)
+negotiating Active price discussion contact Yes
+follow_up More time needed none Yes (conversation happened)
+
+
+
+
+PAGE 8:
+====================================================================================================
+4.3 Recommended Additional Activity Types
+For full dealership coverage:
+New Type Purpose Pipeline? Activity?
+trade_appraisal Trade-in evaluated Yes — working deal Yes
+credit_app Credit application Yes — strong signal Yes
+pencil_presented Payment worksheet shown Yes — negotiation Yes
+manager_to Manager turnover (T.O.) Yes — escalation Yes
+delivery Vehicle delivered Yes — post-sale Yes
+walk_in Customer arrived Yes — creates deal Yes
+lost_reason Lost reason documented No — close-out No
+4.4 Example Activity Object
+{
+"id":"uuid-auto-generated" ,
+"deal_id" :"uuid-of-linked-deal" ,
+"sales_rep_id" :"uuid-of-rep" ,
+"activity_type" :"call",
+"description" :"Called about 2024 Camry. Discussed trade-in." ,
+"outcome" :"appt_set" ,
+"scheduled_at" :null,
+"completed_at" :"2026-04-01T14:30:00Z" ,
+"contact_quality_score" :0.85,
+"response_time_minutes" :12,
+"follow_up_sequence" :2,
+"created_at" :"2026-04-01T14:30:00Z"
+}
+5. UI Presentation Recommendations
+5.1 Deal Detail Page Timeline
+Chronological timeline  (newest first) with activity type icons and color-coded outcome badges
+High-value interactions  (test_drive, appointment showed, negotiating, sold) should appear with
+larger visual weight (bold, colored border, icon emphasis)
+Low-value touches  (voicemails, notes, automated emails) should appear smaller/muted
+Pipeline stage markers  should appear in the timeline when deal.status_changed  events occur
+Next action card  at the top: "Next follow-up: April 3 at 2:00 PM — Confirm appointment" or "⚠️ No
+follow-up scheduled — schedule one now"
+Activity gap warnings : If more than 48 hours between activities, show a red gap indicator
+Customer response indicators : Show inbound vs. outbound direction• 
+• 
+• 
+• 
+• 
+• 
+• 
+
+
+
+
+PAGE 9:
+====================================================================================================
+5.2 Rep Dashboard Summaries
+Current state: RecentActivities  shows today's calls, meetings, emails. PacingTracker  shows funnel
+metrics. DailyGoals  shows progress bars.
+Recommendations:  - Lead with "Opportunities Needing Action"  — stale leads, overdue follow-ups,
+appointments to confirm - Pacing trajectory  — "At current pace, you'll finish at 8 units. Quota is 12. Need
+2 more appointments this week." - Activity quality indicator  — connected-call ratio, not just total calls -
+Daily rhythm view  — time-block showing when activities happened, highlighting dead zones
+5.3 Manager Dashboard Summaries
+Current state: ManagerDashboardView  shows store KPIs, alerts, top 3 reps, navigation cards.
+Recommendations:  -  Alert severity ranking  — weight alerts by revenue at risk -  "Who needs help
+right now?"  — reps with biggest gap between performance and quota pace - Pipeline health heatmap
+— stages with most stuck deals and biggest leakage - Revenue-at-risk counter  — total dollar amount in
+at-risk deals
+5.4 Activity Filtering and Grouping
+View Primary Grouping Secondary Default Filter
+Deal timeline Chronological None All for deal
+Rep dashboard By type By outcome Today, this rep
+Manager feed By rep By time Today, all reps
+Analytics By metric By period MTD, this rep
+Accountability By risk score By alert type Open items
+5.5 Key UI Principles
+Show overdue follow-up badge counts on dashboard header
+Add red border to pipeline Kanban cards with overdue follow-ups
+Show follow-up compliance column on leaderboard
+Make nextBestAction  a persistent banner on analytics page
+Make recommendations specific: "You need 3 more appointments this week" not "improve your close
+rate"• 
+• 
+• 
+• 
+• 
+
+
+
+
+PAGE 10:
+====================================================================================================
+6. Analytics and KPI Usage
+6.1 Core Metrics and Activity Sources
+Metric Formula Strongest Predictor?
+Contact Rate Connected activities / Total leads Yes — #1 predictor
+Response Time deal.created to first activity Yes — <15 min = 3x rate
+Appointment Set Rate Appts set / Contacts Yes — shows skill
+Show Rate Shows / Appts set Yes — shows discipline
+Close Rate (source) Sold / Leads from source Yes — source quality
+Close Rate (rep) Sold / Total leads Yes — primary measure
+Days to Sale Close date - Created date Moderate
+Follow-Up Consistency On-time follow-ups / Total scheduled Yes — discipline
+Activity-to-Sale Activities / Closed deals Moderate
+Lead Quality by Source Conversion rate × volume Yes — allocation
+Pipeline Leakage Drop-off % between stages Yes — where deals die
+6.2 Signal vs. Noise
+High-signal activities (directly predict outcomes):  1. Connected calls — gateway to every sale 2.
+Appointments set — most reliable leading indicator 3. Test drives — >60% of test-driven customers buy 4.
+Speed-to-lead — 5-min response = 9x more likely to convert 5. Show rate — confirmation discipline
+separates top performers
+Moderate-signal:  6. Follow-up completion rate 7. Email replies received 8. Credit application submitted 9.
+Manager T.O.
+Low-signal / noise:  10. Voicemails left — effort, not engagement 11. Emails sent with no reply 12. Notes
+added 13. Automated messages 14. Bulk text campaigns
+6.3 Forecasting Inputs
+TopRep's Bayesian Monte Carlo engine uses:
+
+
+
+
+PAGE 11:
+====================================================================================================
+Input Source Usage
+Sold units so far rep_month_stats.sold_units Starting point
+Leads so far rep_month_stats.leads Lead velocity
+Day / Days in month Calendar Remaining days
+Source-stage posteriors rep_stage_posteriors  (12 params) Beta conversion rates
+Store priors source_stage_priors Bayesian shrinkage
+Lead volume lambdas Computed from velocity Poisson lead arrivals
+Quota rep_quota_updated  events Target threshold
+Output: expected sales, P10/P90 bounds, quota probability, top scenario, next best action.
+7. Suggested Data Structure / Schema Strategy
+7.1 Current Architecture (Five Layers)
+Layer1:RAWINGESTION (append-only)
+└──eventstable
+Types:deal.created,deal.status_changed ,
+activity .completed ,activity .scheduled ,
+rep_quota_updated ,deal.reassigned ,
+deal.merged,deal.reopened ,
+lead.duplicate_detected
+Layer2:MATERIALIZED STATE(derived fromevents)
+├──dealstable
+├──activities table
+└──leadstable
+Layer3:AGGREGATED ANALYTICS
+├──rep_month_stats
+├──rep_stage_stats
+└──rep_experience
+Layer4:FORECAST OUTPUTS
+├──rep_stage_posteriors
+├──source_stage_priors
+├──rep_month_forecast
+├──forecast_runs
+└──scenario_runs
+Layer5:CONFIGURATION
+├──profiles
+├──quotas
+└──app_settings
+
+
+
+
+PAGE 12:
+====================================================================================================
+7.2 Schema Design Principles
+Activity  types  are  enum-based.  The  CHECK  constraint  on  activities.activity_type  is  correct.
+Enum types enable type-safe validation, deterministic funnel mapping, dashboard aggregation without
+string matching, and analytics consistency.
+Raw source data is preserved separately.  The  raw_source  field on  deal.created  events and the
+payload  JSONB column on events table serve as the audit trail. Raw JSONB payload = exactly what
+came in, never modified. Normalized fields = what analytics uses.
+7.3 Timestamp Strategy
+Field Purpose When Set
+created_at When record entered TopRep Auto, server-side, UTC
+completed_at When activity occurred Event payload or UI
+scheduled_at Future activity planned At scheduling time
+event_sequence_id Monotonic ordering Auto-increment
+7.4 Recommended Extension: Structured Activity Metadata
+Add metadata JSONB DEFAULT '{}'  column to activities for richer analytics:
+// Call activity:
+{"direction" :"outbound" ,"duration_seconds" :180}
+// Test drive:
+{"vehicle" :"2024 Toyota Camry XLE" ,"stock":"A12345" }
+// Trade appraisal:
+{"trade_vehicle" :"2019 Honda Accord" ,"value":18500}
+// Credit app:
+{"tier":"prime","approved" :true,"lender" :"Toyota Financial" }
+
+
+
+
+PAGE 13:
+====================================================================================================
+8. Red Flags / Common Failure Points
+8.1 Low-Quality Activity Detection
+Problem Detection Method Handling Implemented?
+Spam-like bulk activity Activity:progression > 5:1 Anomaly flag, trust score ✅ Yes
+Repeated no-answer calls >5 no_answer on same deal/24h Count as 1 attempt Partial
+Empty notes note with null/short description Don't count as activity ✅ Yes
+Automated emails Bulk creation (>20 in <5 min) Mark automated, exclude ❌ Needed
+Duplicate actions Same type+deal+outcome in 5 min Idempotent upsert ✅ Yes
+Backdated entries completed_at << created_at isBackfill() detection ✅ Yes
+Non-substantive touches VMs, unread emails, notes Separate from "contacts" ✅ Yes
+Inflated counts 50+ activities/day, <3 progressions Trust score < 0.5 ✅ Yes
+8.2 Activity Weighting Philosophy
+Core principle: Reward outcomes, not efforts.
+Tier 1 — Full Weight (1.0):  Connected call, appointment set, appointment showed, test drive, deal closed
+Tier 2 — Partial Weight (0.3–0.5):  Outbound call no answer, voicemail left, email sent, text sent with no
+response
+Tier 3 — Zero Weight (performance):  Notes added, follow-up scheduled, automated emails, internal
+messages
+The contact_quality_score  field should be set based on type + outcome:
+Activity + Outcome Quality Score
+call + connected 1.0
+call + appt_set 1.0
+call + no_answer 0.2
+call + left_vm 0.3
+test_drive + any 1.0
+email + connected (reply) 0.8
+email + sent (no reply) 0.1
+note + any 0.0
+voicemail + left_vm 0.3
+
+
+
+
+PAGE 14:
+====================================================================================================
+8.3 Pipeline-Specific Failure Points
+Failure What Goes Wrong Detection
+Internet leads going cold Rep doesn't call in 30 min Speed-to-lead alert ✅
+Appointments not confirmed No-shows from no confirmation 24h unconfirmed alert ✅
+Negotiations stuck No manager T.O., deal dies >3 day alert ✅
+Cherry-picking leads Only works one source source_breadth_count ✅
+Gross compression Gives away too much margin 14-day rolling comparison ✅
+Follow-up dropout Stops after 2 attempts follow_up_sequence tracking
+"Be-back" abandonment Left customer never re-contacted 7-day stale hold flag
+9. Final Recommended Design Principles
+Principle 1: Events Are the Source of Truth
+Everything flows from the append-only event log. Never modify events. Always recompute derived state
+from events when in doubt ( replayEventsToStats() ). Preserve raw payloads — they're your audit trail.
+Principle 2: Funnel Stages Come from Activity Outcomes, Not Deal Status
+The deal status is a UI/workflow construct. The analytical funnel comes from activity outcomes. A deal can
+be in "proposal" status without the customer being contacted. The Bayesian engine needs stage-by-stage
+conversion rates, not status transition counts.
+Principle 3: Measure Contact Quality, Not Contact Quantity
+Emphasize connected calls over total calls (contact rate, not dial count), appointments set over contacts
+made  (sales  skill),  show  rate  over  appointments  set  (discipline),  and  close  rate  over  total  activity
+(outcomes, not effort).
+Principle 4: Speed-to-Lead Is Non-Negotiable
+Internet lead response time is the single most impactful metric. Track response_time_minutes  on every
+activity. Alert within 15 minutes. Escalate at 30 minutes. Show as top-level dashboard metric.
+Principle 5: Bayesian Shrinkage Protects New Reps
+Store-level priors prevent penalizing new reps with sparse data. A new rep with 3 leads and 1 sale should
+not show 33% close rate — the posterior shrinks toward the store baseline (~6–8%). Confidence labels
+(low/medium/high) communicate reliability.
+
+
+
+
+PAGE 15:
+====================================================================================================
+Principle 6: Context Flags Prevent Unfair Comparisons
+The context module identifies when performance differences are driven by external factors (lead quality,
+inventory pressure) vs. rep skill. When lead quality is low, attribute to "external_factor" and recommend
+management action.
+Principle 7: Separate Recordkeeping from Analytics-Ready Data
+The  three-layer  architecture  (raw  events  →  materialized  state  →  aggregated  analytics)  must  be
+maintained. Dashboards never query events directly. Analytics should be rebuildable from events.
+Principle 8: Design for Coaching, Not Just Tracking
+Every metric should answer one of: "What should I do right now?" / "Am I on track?" / "Where am I losing
+deals?" / "What should I improve?" / "Who needs help?" — If a feature doesn't answer one of these, it's
+recordkeeping.
+Principle 9: The Leaderboard Must Be Trustworthy
+Rank by won units or revenue — not activity count. Show gross per unit alongside units. Show close rate
+alongside  volume.  Use  trust  scores  to  flag  suspicious  patterns.  Never  show  raw  activity  counts  on
+leaderboards.
+Principle 10: Build for Replay, Not Real-Time Perfection
+Event-sourced architecture means TopRep can always rebuild analytics from the event log. This handles
+imperfect data quality, evolving requirements, historical analysis, and auditing. Run drift detection weekly
+and alert if divergence is found.
+This document is based on analysis of the TopRep codebase as of April 2026. All references to existing
+implementations have been verified against actual source code, database schemas, event schemas,
+domain modules, and UI components.
+___BEGIN___COMMAND_DONE_MARKER___0

@@ -243,7 +243,7 @@ class TestActivityScheduled:
         event = _make_event("activity.scheduled", {
             "activity_id": _activity_id(),
             "deal_id": _deal_id(),
-            "activity_type": "appointment",
+            "activity_type": "smoke_signal",
             "scheduled_for": "2026-03-01T10:00:00.000Z",
         })
         errs = validate_event(event)
@@ -375,9 +375,11 @@ class TestGeneratedEventsCompliance:
         )
 
     def test_event_type_coverage(self):
-        """All five allowed event types must appear in a normal run."""
+        """All six allowed event types must appear in a normal run."""
         team = build_team(salespeople=4, managers=1, bdc_agents=1)
         start = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        # Provide multiple rep IDs so deal.reassigned events can be generated
+        rep_ids = [str(uuid.uuid4()) for _ in range(4)]
         events = generate_events(
             start_date=start,
             days=30,
@@ -385,6 +387,7 @@ class TestGeneratedEventsCompliance:
             team=team,
             dealership_id=_DEALERSHIP,
             seed=42,
+            sales_rep_ids=rep_ids,
         )
         found_types = {e.type for e in events}
         for et in ALLOWED_EVENT_TYPES:
