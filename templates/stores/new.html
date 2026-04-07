@@ -47,10 +47,6 @@
         <label for="managers">Managers</label>
         <input id="managers" name="managers" type="number" value="2" min="1" />
       </div>
-      <div class="form-row">
-        <label for="bdc_agents">BDC Agents</label>
-        <input id="bdc_agents" name="bdc_agents" type="number" value="3" min="0" />
-      </div>
     </div>
   </section>
 
@@ -288,7 +284,6 @@ function applyTemplate(key) {
   const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
   set('salespeople', t.salespeople);
   set('managers', t.managers);
-  set('bdc_agents', t.bdc_agents);
   set('daily_leads', t.daily_leads);
   set('month_shape', t.month_shape);
   if (t.archetype_dist) {

@@ -393,15 +393,16 @@ def admin_create_user(email: str, password: str, user_id: str | None = None) -> 
 
 
 def provision_store_reps(store_config: dict) -> list[dict]:
-    """Create auth users + upsert profiles + reps rows for all sales reps in a store.
+    """Create auth users + upsert profiles + reps rows for all store sellers/managers.
 
-    Returns a list of credential dicts: {rep_name, archetype, email, password, user_id}.
+    Returns a list of credential dicts: {rep_name, role, archetype, email, password, user_id}.
     """
     store_id = store_config.get("dealership_id", "unknown")
     # Build a slug: lowercase, replace non-alphanum with hyphen
     store_slug = re.sub(r"[^a-z0-9]+", "-", store_id.lower()).strip("-")
     archetype_dist: dict[str, int] = store_config.get("archetype_dist", {})
     salespeople = store_config.get("salespeople", 0)
+    managers = store_config.get("managers", 0)
 
     # Build ordered archetype list (same as build_team)
     archetype_slots: list[str] = []
@@ -470,7 +471,65 @@ def provision_store_reps(store_config: dict) -> list[dict]:
 
         credentials.append({
             "rep_name": f"Sales Rep {i}",
+            "role": "sales_rep",
             "archetype": arch,
+            "email": email,
+            "password": password,
+            "user_id": user_id,
+        })
+
+    # Provision managers as first-class users as well.
+    for i in range(1, managers + 1):
+        member_id = f"M-{i:03d}"
+        email = f"sim-{store_slug}-mgr{i}@test.com"
+        password = "test123"
+
+        manager_uuid = _rep_uuid(store_id, member_id)
+
+        result = admin_create_user(email, password, user_id=manager_uuid)
+        if "error" in result:
+            error_text = str(result.get("error", ""))
+            if "already" in error_text.lower() or result.get("status") == 422:
+                user_id = manager_uuid
+            else:
+                credentials.append({
+                    "rep_name": f"Manager {i}",
+                    "role": "manager",
+                    "archetype": "manager",
+                    "email": email,
+                    "password": password,
+                    "user_id": None,
+                    "error": error_text,
+                })
+                continue
+        else:
+            user_id = result.get("id") or result.get("user", {}).get("id") or manager_uuid
+
+        if user_id:
+            profile_body = {
+                "id": user_id,
+                "email": email,
+                "first_name": "Manager",
+                "last_name": f"{i}",
+                "role": "manager",
+                "store_id": store_uuid,
+            }
+            rest_post_with_headers(
+                path="profiles",
+                body=profile_body,
+                headers={**_service_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
+            reps_body = {"id": user_id, "store_id": store_uuid}
+            rest_post_with_headers(
+                path="reps",
+                body=reps_body,
+                headers={**_service_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
+
+        credentials.append({
+            "rep_name": f"Manager {i}",
+            "role": "manager",
+            "archetype": "manager",
             "email": email,
             "password": password,
             "user_id": user_id,

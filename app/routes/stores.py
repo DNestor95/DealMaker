@@ -161,7 +161,7 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         "dealership_id": store_id,
         "salespeople": int(data.get("salespeople", 8)),
         "managers": int(data.get("managers", 2)),
-        "bdc_agents": int(data.get("bdc_agents", 3)),
+        "bdc_agents": 0,
         "daily_leads": int(data.get("daily_leads", 20)),
         "lead_sources": data.getlist("lead_sources") or ["internet", "phone", "showroom"],
         "deal_statuses": data.getlist("deal_statuses") or ["lead", "qualified", "closed_won", "closed_lost"],
@@ -173,10 +173,6 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         "gross_profit_max": int(data.get("gross_profit_max", 6000)),
         "close_rate_pct": int(data.get("close_rate_pct", 36)),
         "status_advance_pct": int(data.get("status_advance_pct", 88)),
-        "contact_rate_pct": int(data.get("contact_rate_pct", 72)),
-        "appointment_rate_pct": int(data.get("appointment_rate_pct", 55)),
-        "showroom_rate_pct": int(data.get("showroom_rate_pct", 65)),
-        "negotiation_rate_pct": int(data.get("negotiation_rate_pct", 80)),
         "activities_per_deal_min": int(data.get("activities_per_deal_min", 2)),
         "activities_per_deal_max": int(data.get("activities_per_deal_max", 6)),
         "archetype_dist": archetype_dist,
@@ -215,25 +211,21 @@ for _s in _stores.values():
     _s.setdefault("sim_speed_multiplier", 1.0)
     _s.setdefault("sim_days_total", 0)
     _s.setdefault("sim_start_date", "")
-    _s.setdefault("contact_rate_pct", 72)
-    _s.setdefault("appointment_rate_pct", 55)
-    _s.setdefault("showroom_rate_pct", 65)
-    _s.setdefault("negotiation_rate_pct", 80)
 
 
 STORE_TEMPLATES = {
-    "custom": {"label": "Custom (blank)", "salespeople": 8, "managers": 2, "bdc_agents": 3,
+    "custom": {"label": "Custom (blank)", "salespeople": 8, "managers": 2,
                "daily_leads": 20, "close_rate_pct": 36, "month_shape": "flat",
                "archetype_dist": {"rockstar": 1, "solid_mid": 5, "underperformer": 1, "new_hire": 1}},
     "high_volume_internet": {"label": "High-Volume Internet Store", "salespeople": 12, "managers": 3,
-                             "bdc_agents": 5, "daily_leads": 40, "close_rate_pct": 30, "month_shape": "realistic",
+                             "daily_leads": 40, "close_rate_pct": 30, "month_shape": "realistic",
                              "archetype_dist": {"rockstar": 2, "solid_mid": 7, "underperformer": 2, "new_hire": 1}},
-    "rural_walkin": {"label": "Rural Walk-In Store", "salespeople": 4, "managers": 1, "bdc_agents": 1,
+    "rural_walkin": {"label": "Rural Walk-In Store", "salespeople": 4, "managers": 1,
                      "daily_leads": 8, "close_rate_pct": 45, "month_shape": "realistic",
                      "archetype_dist": {"rockstar": 1, "solid_mid": 2, "underperformer": 1, "new_hire": 0}},
-    "bdc_heavy_phone": {"label": "BDC-Heavy Phone Store", "salespeople": 6, "managers": 2, "bdc_agents": 8,
-                        "daily_leads": 25, "close_rate_pct": 33, "month_shape": "realistic",
-                        "archetype_dist": {"rockstar": 1, "solid_mid": 4, "underperformer": 1, "new_hire": 0}},
+    "manager_phone_store": {"label": "Manager-Led Phone Store", "salespeople": 6, "managers": 2,
+                             "daily_leads": 25, "close_rate_pct": 33, "month_shape": "realistic",
+                             "archetype_dist": {"rockstar": 1, "solid_mid": 4, "underperformer": 1, "new_hire": 0}},
 }
 
 # Speed presets shared between stores (form) and simulation (thread logic).
@@ -255,9 +247,9 @@ _FORM_CONTEXT = dict(
         "connected", "no_answer", "left_vm", "appt_set",
         "showed", "no_show", "sold", "lost", "negotiating", "follow_up",
     ],
-    rep_roles=["sales_rep", "manager", "bdc"],
+    rep_roles=["sales_rep", "manager"],
     store_templates=STORE_TEMPLATES,
-    scenario_keys=["slow_industry_month", "manager_on_vacation", "bdc_underperforming",
+    scenario_keys=["slow_industry_month", "manager_on_vacation",
                    "inventory_shortage", "strong_incentive_month", "high_heat_weekend"],
     month_shapes=["flat", "realistic", "front_loaded"],
     speed_presets=SPEED_PRESETS,
@@ -305,22 +297,22 @@ def create_store():
         anchor = "#provisioning"
         if success_count:
             flash(
-                f"✓ Store '{store_id}' created and {success_count} rep login(s) provisioned. "
+                f"✓ Store '{store_id}' created and {success_count} user login(s) provisioned. "
                 "Scroll down to see credentials.",
                 "success",
             )
         else:
             flash(
-                f"Store '{store_id}' created. Rep provisioning ran but encountered errors — check credentials below.",
+                f"Store '{store_id}' created. User provisioning ran but encountered errors — check credentials below.",
                 "warning",
             )
     else:
         flash(
-            f"Store '{store_id}' created. Add SUPABASE_SERVICE_ROLE_KEY in Settings to provision rep logins.",
+            f"Store '{store_id}' created. Add SUPABASE_SERVICE_ROLE_KEY in Settings to provision user logins.",
             "info",
         )
 
-    return redirect(url_for("stores.store_detail", store_id=store_id) + anchor)
+    return redirect(url_for("stores.index"))
 
 
 @bp.route("/stores/<store_id>/edit", methods=["GET"])
@@ -413,7 +405,7 @@ def sync_info(store_id: str):
     team = build_team(
         salespeople=store["salespeople"],
         managers=store["managers"],
-        bdc_agents=store["bdc_agents"],
+        bdc_agents=0,
         archetype_dist=store.get("archetype_dist"),
         new_hire_dates=_parse_hire_dates(store),
     )
@@ -493,7 +485,7 @@ def backfill_store(store_id: str):
     team = build_team(
         salespeople=store["salespeople"],
         managers=store["managers"],
-        bdc_agents=store["bdc_agents"],
+        bdc_agents=0,
         archetype_dist=store.get("archetype_dist"),
         new_hire_dates=_parse_hire_dates(store),
     )

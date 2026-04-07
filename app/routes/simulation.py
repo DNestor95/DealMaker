@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from collections import defaultdict
@@ -26,7 +27,14 @@ _APP_ROOT = Path(__file__).parent.parent.parent
 
 # Import core generation helpers from v1 generator (still valid in v2)
 sys.path.insert(0, str(_APP_ROOT))
-from dealmaker_generator import AUTH_ERROR_401, build_team, generate_events, normalize_delivery_url, send_events_to_api
+from dealmaker_generator import (
+    AUTH_ERROR_401,
+    build_team,
+    generate_events,
+    normalize_delivery_url,
+    sales_rep_uuid,
+    send_events_to_api,
+)
 from app.supabase_client import _api_url as _supabase_api_url, _anon_key as _supabase_anon_key
 
 bp = Blueprint("simulation", __name__, url_prefix="/simulation")
@@ -111,7 +119,7 @@ class _StoreThread(threading.Thread):
         team = build_team(
             salespeople=s["salespeople"],
             managers=s["managers"],
-            bdc_agents=s["bdc_agents"],
+            bdc_agents=0,
             archetype_dist=s.get("archetype_dist"),
             new_hire_dates=_parse_hire_dates(s),
         )
@@ -148,10 +156,6 @@ class _StoreThread(threading.Thread):
                 gross_profit_max=s.get("gross_profit_max", 6000),
                 activities_min=s.get("activities_per_deal_min", 2),
                 activities_max=s.get("activities_per_deal_max", 6),
-                contact_rate=s.get("contact_rate_pct", 72) / 100.0,
-                appointment_rate=s.get("appointment_rate_pct", 55) / 100.0,
-                showroom_rate=s.get("showroom_rate_pct", 65) / 100.0,
-                negotiation_rate=s.get("negotiation_rate_pct", 80) / 100.0,
                 month_shape=s.get("month_shape", "flat"),
                 scenarios=s.get("default_scenarios", []),
             )
@@ -299,31 +303,21 @@ def status(store_id: str):
 # ---------------------------------------------------------------------------
 
 def _build_report(store_id: str) -> dict | None:
-    """Parse the store's JSONL output file and return aggregated stats."""
+    """Build report stats from local JSONL output, with DB fallback for API-only stores."""
     output_file = _OUTPUT_DIR / "stores" / f"{store_id}.jsonl"
-    if not output_file.exists():
-        return None
 
-    type_counts: dict[str, int] = defaultdict(int)
-    deal_amounts: list[float] = []
-    gross_profits: list[float] = []
-    close_won = 0
-    close_lost = 0
-    rep_event_counts: dict[str, int] = defaultdict(int)
-    activity_type_counts: dict[str, int] = defaultdict(int)
-    source_counts: dict[str, int] = defaultdict(int)
-    daily_deals: dict[str, int] = defaultdict(int)
+    def _aggregate(events_iter, source_label: str) -> dict:
+        type_counts: dict[str, int] = defaultdict(int)
+        deal_amounts: list[float] = []
+        gross_profits: list[float] = []
+        close_won = 0
+        close_lost = 0
+        rep_event_counts: dict[str, int] = defaultdict(int)
+        activity_type_counts: dict[str, int] = defaultdict(int)
+        source_counts: dict[str, int] = defaultdict(int)
+        daily_deals: dict[str, int] = defaultdict(int)
 
-    with output_file.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
+        for ev in events_iter:
             ev_type: str = ev.get("type", "unknown")
             type_counts[ev_type] += 1
 
@@ -343,14 +337,11 @@ def _build_report(store_id: str) -> dict | None:
                     pass
                 if payload.get("source"):
                     source_counts[payload["source"]] += 1
-                # Track daily deal volume
                 created_at: str = ev.get("created_at", "")
                 if created_at:
-                    day_key = created_at[:10]
-                    daily_deals[day_key] += 1
+                    daily_deals[created_at[:10]] += 1
 
             elif ev_type == "deal.status_changed":
-                # Generator uses "new_status" (per REALTIME_DATA_INGEST_REFERENCE.md contract).
                 new_status = payload.get("new_status", "")
                 if new_status == "closed_won":
                     close_won += 1
@@ -361,34 +352,113 @@ def _build_report(store_id: str) -> dict | None:
                 act_type = payload.get("activity_type", "unknown")
                 activity_type_counts[act_type] += 1
 
-    total_deals = type_counts.get("deal.created", 0)
-    close_rate = round(close_won / total_deals * 100, 1) if total_deals else 0.0
-    avg_deal_amount = round(sum(deal_amounts) / len(deal_amounts)) if deal_amounts else 0
-    avg_gross_profit = round(sum(gross_profits) / len(gross_profits)) if gross_profits else 0
+        total_deals = type_counts.get("deal.created", 0)
+        close_rate = round(close_won / total_deals * 100, 1) if total_deals else 0.0
+        avg_deal_amount = round(sum(deal_amounts) / len(deal_amounts)) if deal_amounts else 0
+        avg_gross_profit = round(sum(gross_profits) / len(gross_profits)) if gross_profits else 0
+        top_reps = sorted(rep_event_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+        daily_series = sorted(daily_deals.items())
 
-    # Sort top reps by event count
-    top_reps = sorted(rep_event_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+        return {
+            "store_id": store_id,
+            "total_events": sum(type_counts.values()),
+            "event_type_counts": dict(type_counts),
+            "total_deals": total_deals,
+            "closed_won": close_won,
+            "closed_lost": close_lost,
+            "close_rate_pct": close_rate,
+            "avg_deal_amount": avg_deal_amount,
+            "avg_gross_profit": avg_gross_profit,
+            "unique_reps": len(rep_event_counts),
+            "top_reps": top_reps,
+            "activity_type_counts": dict(activity_type_counts),
+            "source_counts": dict(source_counts),
+            "daily_deals": daily_series,
+            "file_path": source_label,
+        }
 
-    # Sort daily deals for a time-series view
-    daily_series = sorted(daily_deals.items())
+    # Primary source: local JSONL output written by file/both delivery.
+    if output_file.exists():
+        parsed_events: list[dict] = []
+        with output_file.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed_events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        if parsed_events:
+            return _aggregate(parsed_events, str(output_file))
 
-    return {
-        "store_id": store_id,
-        "total_events": sum(type_counts.values()),
-        "event_type_counts": dict(type_counts),
-        "total_deals": total_deals,
-        "closed_won": close_won,
-        "closed_lost": close_lost,
-        "close_rate_pct": close_rate,
-        "avg_deal_amount": avg_deal_amount,
-        "avg_gross_profit": avg_gross_profit,
-        "unique_reps": len(rep_event_counts),
-        "top_reps": top_reps,
-        "activity_type_counts": dict(activity_type_counts),
-        "source_counts": dict(source_counts),
-        "daily_deals": daily_series,
-        "file_path": str(output_file),
-    }
+    # Fallback source: DB events for API-only runs.
+    database_url = database_url_from_env().strip()
+    store = _stores.get(store_id)
+    if not (database_url and store and is_postgres_dsn(database_url)):
+        return None
+
+    rep_ids = [
+        str(c.get("user_id"))
+        for c in store.get("credentials", [])
+        if isinstance(c, dict) and c.get("user_id") and not c.get("error")
+    ]
+    if not rep_ids:
+        team = build_team(
+            salespeople=store.get("salespeople", 0),
+            managers=store.get("managers", 0),
+            bdc_agents=0,
+            archetype_dist=store.get("archetype_dist"),
+            new_hire_dates=_parse_hire_dates(store),
+        )
+        rep_ids = [sales_rep_uuid(store_id, member) for member in team if member.role in {"sales", "manager"}]
+
+    try:
+        import psycopg
+
+        db_events: list[dict] = []
+        with psycopg.connect(database_url, connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                # Also discover provisioned profile IDs by deterministic store slug.
+                store_slug = re.sub(r"[^a-z0-9]+", "-", store_id.lower()).strip("-")
+                cur.execute(
+                    """
+                    SELECT id::text
+                    FROM profiles
+                    WHERE email LIKE %s
+                    """,
+                    (f"sim-{store_slug}-%",),
+                )
+                rep_ids.extend(str(row[0]) for row in cur.fetchall())
+                rep_ids = sorted(set(rep_ids))
+                if not rep_ids:
+                    return None
+
+                cur.execute(
+                    """
+                    SELECT sales_rep_id::text, type, payload, created_at
+                    FROM events
+                    WHERE sales_rep_id = ANY(%s::uuid[])
+                    ORDER BY created_at ASC
+                    """,
+                    (rep_ids,),
+                )
+                for sales_rep_id, ev_type, payload, created_at in cur.fetchall():
+                    db_events.append(
+                        {
+                            "sales_rep_id": str(sales_rep_id),
+                            "type": str(ev_type),
+                            "payload": payload or {},
+                            "created_at": created_at.astimezone(timezone.utc)
+                            .isoformat(timespec="milliseconds")
+                            .replace("+00:00", "Z"),
+                        }
+                    )
+        if not db_events:
+            return None
+        return _aggregate(db_events, "database:events")
+    except Exception:
+        return None
 
 
 @bp.route("/<store_id>/report")

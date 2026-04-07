@@ -74,6 +74,24 @@ The test suite (56 tests) proves that:
 - `created_at` (optional per TopRep schema) is always sent for backfill fidelity.
 - All five event types are generated in a normal simulation run.
 
+## Clear Database (schema-aware)
+
+Use this command to clear all data from the Postgres public schema after
+schema changes. It discovers tables at runtime, so newly added tables are
+included automatically.
+
+```bash
+python clear_db.py
+```
+
+Non-interactive mode:
+
+```bash
+python clear_db.py --yes
+```
+
+Requires `DATABASE_URL` (or `TOPREP_DATABASE_URL`) to be set in your `.env`.
+
 ## Verification plan
 
 1. **Local file check** — run Step 1 + Step 2 above; confirm `"passed": true`.

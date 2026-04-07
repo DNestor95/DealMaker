@@ -90,7 +90,6 @@
     <table class="kv-table">
       <tr><td>Sales Reps</td><td>{{ store.salespeople }}</td></tr>
       <tr><td>Managers</td><td>{{ store.managers }}</td></tr>
-      <tr><td>BDC Agents</td><td>{{ store.bdc_agents }}</td></tr>
     </table>
   </section>
 
@@ -219,9 +218,9 @@
     <pre id="backfill-result" class="code-block" style="display:none"></pre>
   </section>
 
-  <!-- ── Rep User Provisioning ─── -->
+  <!-- ── User Provisioning ─── -->
   <section class="card card--wide" id="provisioning">
-    <h2>QA Rep Provisioning</h2>
+    <h2>QA User Provisioning (Reps + Managers)</h2>
     {% if not service_key_configured %}
     <div class="alert alert--warning">
       ⚠ <strong>SUPABASE_SERVICE_ROLE_KEY</strong> is not configured.
@@ -244,14 +243,14 @@
 
     {% if store.credentials %}
     <details open>
-      <summary class="card-summary">QA Login Credentials ({{ store.credentials | length }} reps)</summary>
+      <summary class="card-summary">QA Login Credentials ({{ store.credentials | length }} users)</summary>
       <div class="cred-actions">
         <button class="btn btn--sm btn--ghost" onclick="copyCredentials()">📋 Copy all as JSON</button>
         <button class="btn btn--sm btn--ghost" onclick="downloadCSV()">⬇ Download CSV</button>
       </div>
       <table class="table" id="cred-table">
         <thead>
-          <tr><th>Rep Name</th><th>Archetype</th><th>Email</th><th>Password</th>
+          <tr><th>Name</th><th>Role</th><th>Archetype</th><th>Email</th><th>Password</th>
           {% if toprep_url_configured %}<th>Login Link</th>{% endif %}
           <th>Status</th></tr>
         </thead>
@@ -259,6 +258,7 @@
           {% for cred in store.credentials %}
           <tr>
             <td>{{ cred.rep_name }}</td>
+            <td><span class="tag">{{ (cred.role | default('sales_rep')) | replace('_',' ') | title }}</span></td>
             <td><span class="tag">{{ cred.archetype | replace('_',' ') | title }}</span></td>
             <td><code>{{ cred.email }}</code></td>
             <td>
@@ -285,9 +285,9 @@
     {% endif %}
   </section>
 
-  <!-- ── Live Rep Profiles ─── -->
+  <!-- ── Live Profiles ─── -->
   <section class="card card--wide">
-    <h2>Live Rep Profiles (from TopRep DB)</h2>
+    <h2>Live User Profiles (from TopRep DB)</h2>
     {% if profiles %}
     <table class="table">
       <thead>
@@ -304,7 +304,7 @@
       </tbody>
     </table>
     {% else %}
-    <p class="hint">No rep profiles found for this store in TopRep (or API not connected).</p>
+    <p class="hint">No user profiles found for this store in TopRep (or API not connected).</p>
     {% endif %}
   </section>
 
@@ -416,7 +416,7 @@ function provisionReps() {
     .then(r => r.json())
     .then(d => {
       if (d.error) { status.textContent = '❌ ' + d.error; }
-      else { status.textContent = '✓ Provisioned ' + (d.credentials || []).length + ' reps. Reload page to see credentials.'; location.reload(); }
+      else { status.textContent = '✓ Provisioned ' + (d.credentials || []).length + ' users. Reload page to see credentials.'; location.reload(); }
     })
     .catch(e => { status.textContent = 'Error: ' + e; });
 }
@@ -451,23 +451,25 @@ function copyCredentials() {
     const cells = row.querySelectorAll('td');
     creds.push({
       rep_name: cells[0].textContent.trim(),
-      archetype: cells[1].textContent.trim(),
-      email: cells[2].textContent.trim(),
-      password: cells[3].querySelector('.pwd-mask').dataset.pwd,
+      role: cells[1].textContent.trim(),
+      archetype: cells[2].textContent.trim(),
+      email: cells[3].textContent.trim(),
+      password: cells[4].querySelector('.pwd-mask').dataset.pwd,
     });
   });
   navigator.clipboard.writeText(JSON.stringify(creds, null, 2));
 }
 
 function downloadCSV() {
-  const rows = [['rep_name','archetype','email','password']];
+  const rows = [['rep_name','role','archetype','email','password']];
   document.querySelectorAll('#cred-table tbody tr').forEach(row => {
     const cells = row.querySelectorAll('td');
     rows.push([
       cells[0].textContent.trim(),
       cells[1].textContent.trim(),
       cells[2].textContent.trim(),
-      cells[3].querySelector('.pwd-mask').dataset.pwd,
+      cells[3].textContent.trim(),
+      cells[4].querySelector('.pwd-mask').dataset.pwd,
     ]);
   });
   const csv = rows.map(r => r.map(v => '"' + v.replace(/"/g, '""') + '"').join(',')).join('\n');

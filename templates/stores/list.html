@@ -12,7 +12,7 @@
     <tr>
       <th>Dealership ID</th>
       <th>Status</th>
-      <th>Reps / Mgrs / BDC</th>
+      <th>Reps / Mgrs</th>
       <th>Leads/Day</th>
       <th>Delivery</th>
       <th>Events Sent</th>
@@ -24,7 +24,7 @@
     <tr data-store="{{ s.dealership_id }}">
       <td><a href="{{ url_for('stores.store_detail', store_id=s.dealership_id) }}">{{ s.dealership_id }}</a></td>
       <td><span class="badge badge--{{ s.status }}" id="status-{{ s.dealership_id }}">{{ s.status }}</span></td>
-      <td>{{ s.salespeople }} / {{ s.managers }} / {{ s.bdc_agents }}</td>
+      <td>{{ s.salespeople }} / {{ s.managers }}</td>
       <td>{{ s.daily_leads }}</td>
       <td>{{ s.delivery }}</td>
       <td id="events-{{ s.dealership_id }}">{{ s.events_sent }}</td>
