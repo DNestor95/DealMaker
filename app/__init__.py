@@ -10,10 +10,12 @@ def create_app() -> Flask:
     from app.routes.stores import bp as stores_bp
     from app.routes.simulation import bp as simulation_bp
     from app.routes.settings import bp as settings_bp
+    from app.routes.fortellis_mock import bp as fortellis_mock_bp
 
     app.register_blueprint(stores_bp)
     app.register_blueprint(simulation_bp)
     app.register_blueprint(settings_bp)
+    app.register_blueprint(fortellis_mock_bp)
 
     @app.get("/health")
     def health():
