@@ -53,6 +53,20 @@ ACTIVITY_OUTCOMES = [
 ]
 DEAL_SOURCES = ["internet", "phone", "showroom"]
 
+# Industry-realistic lead source mix: internet ~60%, phone ~20%, showroom ~20%
+# (NADA/Cox Automotive data: digital leads now dominate franchise dealerships)
+_SOURCE_WEIGHTS = [0.60, 0.20, 0.20]
+
+# Source-specific conversion adjustments based on industry benchmarks:
+# - Internet: low contact rate (~40%), low close rate (~40% of blended avg)
+# - Phone: medium contact rate (~78%), medium close rate (~82% of blended avg)
+# - Showroom: near-perfect contact (100%), high close rate (~1.55× blended avg)
+_SOURCE_RATE_MODS: dict[str, dict[str, float]] = {
+    "internet":  {"close": 0.40, "contact": 0.45, "activities_min": 5, "activities_max": 14},
+    "phone":     {"close": 0.82, "contact": 0.78, "activities_min": 3, "activities_max": 9},
+    "showroom":  {"close": 1.55, "contact": 1.00, "activities_min": 2, "activities_max": 7},
+}
+
 # Richer raw-source strings mapped to canonical sources (for audit trail)
 RAW_SOURCES: dict[str, list[str]] = {
     "internet": [
@@ -214,13 +228,30 @@ _MONTH_SHAPE_WEIGHTS: dict[str, list[tuple[int, int, float]]] = {
 }
 
 
-def daily_weight(day_of_month: int, month_shape: str = "flat") -> float:
-    """Return the relative weight for a given day-of-month under the chosen shape."""
+# Day-of-week multipliers (Monday=0 … Sunday=6).
+# Saturday is the highest-traffic day at most dealerships; Sunday varies by state.
+_DOW_WEIGHTS: dict[int, float] = {
+    0: 0.70,  # Monday
+    1: 0.75,  # Tuesday
+    2: 0.85,  # Wednesday
+    3: 0.90,  # Thursday
+    4: 1.10,  # Friday
+    5: 1.60,  # Saturday — typically 25-35% of weekly volume
+    6: 0.55,  # Sunday (closed or reduced hours at many stores)
+}
+
+
+def daily_weight(day: "datetime | int", month_shape: str = "flat") -> float:
+    """Return the combined weight for a given day (month-shape × day-of-week)."""
+    dom = day if isinstance(day, int) else day.day
     buckets = _MONTH_SHAPE_WEIGHTS.get(month_shape, _MONTH_SHAPE_WEIGHTS["flat"])
+    shape_w = 1.0
     for start, end, weight in buckets:
-        if start <= day_of_month <= end:
-            return weight
-    return 1.0
+        if start <= dom <= end:
+            shape_w = weight
+            break
+    dow_w = _DOW_WEIGHTS.get(day.weekday(), 1.0) if not isinstance(day, int) else 1.0
+    return shape_w * dow_w
 
 
 # ---------------------------------------------------------------------------
@@ -413,9 +444,22 @@ def stable_uuid(*parts: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, "|".join(parts)))
 
 
-def random_business_time(day: datetime, rng: random.Random) -> datetime:
+def random_business_time(
+    day: datetime, rng: random.Random, time_cap: "datetime | None" = None
+) -> datetime:
+    """Return a random timestamp within business hours (8am–7:59pm) for `day`.
+
+    When `time_cap` is supplied and falls on the same calendar date, the upper
+    bound is clamped to `time_cap` so that generated events never appear to be
+    in the future.  This is used when generating today's data during a reset or
+    same-day backfill.
+    """
     start = day.replace(hour=8, minute=0, second=0, microsecond=0)
-    minutes = rng.randint(0, 11 * 60 + 59)
+    end = start + timedelta(hours=11, minutes=59)
+    if time_cap is not None and time_cap.date() == day.date():
+        end = min(end, time_cap)
+    max_minutes = max(0, int((end - start).total_seconds() / 60))
+    minutes = rng.randint(0, max_minutes) if max_minutes > 0 else 0
     return start + timedelta(minutes=minutes)
 
 
@@ -624,22 +668,23 @@ def generate_deal_workflow(
     rng: random.Random,
     sales_rep_id_override: str | None = None,
     base_close_rate: float = 0.36,
-    deal_amount_min: int = 12000,
-    deal_amount_max: int = 68000,
-    gross_profit_min: int = 700,
-    gross_profit_max: int = 6000,
-    activities_min: int = 2,
-    activities_max: int = 6,
+    deal_amount_min: int = 14000,
+    deal_amount_max: int = 72000,
+    gross_profit_min: int = 900,
+    gross_profit_max: int = 4500,
+    activities_min: int = 4,
+    activities_max: int = 12,
     contact_rate: float | None = None,
     appointment_rate: float | None = None,
     showroom_rate: float | None = None,
     negotiation_rate: float | None = None,
     scenario: ScenarioConfig | None = None,
+    time_cap: "datetime | None" = None,
 ) -> list[Event]:
     events: list[Event] = []
     sc = scenario or ScenarioConfig()
 
-    created_ts = random_business_time(day, rng)
+    created_ts = random_business_time(day, rng, time_cap=time_cap)
     sales_member = pick_member(team, "sales", rng)
     manager_member = pick_member(team, "manager", rng)
 
@@ -655,13 +700,22 @@ def generate_deal_workflow(
         activity_mult = arch.activity_mult
         pipeline_advance_rate = arch.pipeline_advance_rate
 
-    # Apply scenario multipliers
-    effective_close_rate = _bounded_rate(base_close_rate * close_rate_mult * sc.close_rate_mult)
+    # Select lead source first — needed for source-specific rate adjustments
+    source = rng.choices(DEAL_SOURCES, weights=_SOURCE_WEIGHTS, k=1)[0]
+    raw_source = rng.choice(RAW_SOURCES[source])
+    _src_mod = _SOURCE_RATE_MODS.get(source, {})
+
+    # Apply scenario multipliers + source-specific close rate adjustment
+    src_close_mult = _src_mod.get("close", 1.0)
+    effective_close_rate = _bounded_rate(base_close_rate * close_rate_mult * sc.close_rate_mult * src_close_mult)
     effective_pipeline_rate = _bounded_rate(pipeline_advance_rate * sc.pipeline_advance_mult)
 
     # Stage-specific realism rates. These model business milestones while keeping
     # DB-compatible canonical statuses.
-    base_contact_rate = 0.72 if contact_rate is None else contact_rate
+    # Contact rates differ strongly by source: showroom visitors are already present,
+    # internet leads are hard to reach, phone leads fall in between.
+    src_contact_mult = _src_mod.get("contact", 1.0)
+    base_contact_rate = (0.72 if contact_rate is None else contact_rate) * src_contact_mult
     base_appointment_rate = 0.55 if appointment_rate is None else appointment_rate
     base_showroom_rate = 0.65 if showroom_rate is None else showroom_rate
     base_negotiation_rate = 0.80 if negotiation_rate is None else negotiation_rate
@@ -671,8 +725,10 @@ def generate_deal_workflow(
     effective_showroom_rate = _bounded_rate(base_showroom_rate * effective_pipeline_rate)
     effective_negotiation_rate = _bounded_rate(base_negotiation_rate * effective_pipeline_rate)
 
-    # Activities per deal
-    raw_activity_count = rng.randint(activities_min, activities_max)
+    # Source-specific activity count bounds: internet leads require more follow-up
+    src_act_min = _src_mod.get("activities_min", activities_min)
+    src_act_max = _src_mod.get("activities_max", activities_max)
+    raw_activity_count = rng.randint(src_act_min, src_act_max)
     bdc_mult = sc.bdc_activity_volume_mult if sales_member.role == "bdc" else 1.0
     target_activity_count = max(1, round(raw_activity_count * activity_mult * bdc_mult))
 
@@ -683,11 +739,9 @@ def generate_deal_workflow(
     # Ensure min < max to avoid randint errors when scenario bumps floor above configured max
     safe_amount_max = max(effective_amount_min + 1, deal_amount_max)
 
-    source = rng.choice(DEAL_SOURCES)
-    raw_source = rng.choice(RAW_SOURCES[source])
-
-    # Allow $0 deals for early-stage internet leads (~15%)
-    if source == "internet" and rng.random() < 0.15:
+    # Allow $0 deals for early-stage internet leads (~7% — reduced from 15%
+    # to better reflect that most CRM leads have at least an inquiry amount)
+    if source == "internet" and rng.random() < 0.07:
         deal_amount = 0
     else:
         deal_amount = rng.randint(max(1, effective_amount_min), safe_amount_max)
@@ -718,12 +772,20 @@ def generate_deal_workflow(
     # Archetype-aware speed-to-lead for first activity gap
     response_range = _RESPONSE_TIME_RANGES.get(sales_member.archetype, (10, 30))
     cursor_ts = created_ts + timedelta(minutes=rng.randint(*response_range))
+    if time_cap is not None:
+        cursor_ts = min(cursor_ts, time_cap)
+
+    def _cap(ts: datetime) -> datetime:
+        return min(ts, time_cap) if time_cap is not None else ts
 
     def _log_activity(stage: str, activity_type: str, outcome: str, ts: datetime) -> datetime:
         nonlocal activity_index, activity_count
         activity_id = stable_uuid("activity", deal_id, str(activity_index))
         scheduled_ts = ts + timedelta(minutes=rng.randint(5, 45))
         completed_ts = scheduled_ts + timedelta(minutes=rng.randint(5, 120))
+        if time_cap is not None:
+            scheduled_ts = min(scheduled_ts, time_cap)
+            completed_ts = min(completed_ts, time_cap)
 
         # Response time: minutes since deal creation
         response_minutes = int((completed_ts - created_ts).total_seconds() / 60)
@@ -784,7 +846,7 @@ def generate_deal_workflow(
             break
 
     if contact_success:
-        next_status_ts = cursor_ts + timedelta(minutes=rng.randint(5, 45))
+        next_status_ts = _cap(cursor_ts + timedelta(minutes=rng.randint(5, 45)))
         events.append(
             make_event(
                 ts=next_status_ts,
@@ -820,7 +882,7 @@ def generate_deal_workflow(
             appointment_set = True
 
     if appointment_set and current_status == "qualified":
-        next_status_ts = cursor_ts + timedelta(minutes=rng.randint(5, 45))
+        next_status_ts = _cap(cursor_ts + timedelta(minutes=rng.randint(5, 45)))
         events.append(
             make_event(
                 ts=next_status_ts,
@@ -849,7 +911,7 @@ def generate_deal_workflow(
         showroom_visit = showed
 
     if showroom_visit and current_status == "proposal":
-        next_status_ts = cursor_ts + timedelta(minutes=rng.randint(10, 60))
+        next_status_ts = _cap(cursor_ts + timedelta(minutes=rng.randint(10, 60)))
         events.append(
             make_event(
                 ts=next_status_ts,
@@ -895,7 +957,7 @@ def generate_deal_workflow(
         win_prob = effective_close_rate * 0.08
 
     close_won = rng.random() < _bounded_rate(win_prob)
-    close_ts = cursor_ts + timedelta(minutes=rng.randint(30, 240))
+    close_ts = _cap(cursor_ts + timedelta(minutes=rng.randint(30, 240)))
     if close_won:
         events.append(
             make_event(
@@ -916,7 +978,7 @@ def generate_deal_workflow(
             )
         )
         # Post-sale: delivery activity
-        delivery_ts = close_ts + timedelta(minutes=rng.randint(60, 480))
+        delivery_ts = _cap(close_ts + timedelta(minutes=rng.randint(60, 480)))
         _log_activity("follow_up", "delivery", "sold", delivery_ts)
     else:
         base_reasons = ["price", "timing", "credit", "vehicle_unavailable", "no_response"]
@@ -962,12 +1024,12 @@ def generate_events(
     sales_rep_id_override: str | None = None,
     sales_rep_ids: list[str] | None = None,
     base_close_rate: float = 0.36,
-    deal_amount_min: int = 12000,
-    deal_amount_max: int = 68000,
-    gross_profit_min: int = 700,
-    gross_profit_max: int = 6000,
-    activities_min: int = 2,
-    activities_max: int = 6,
+    deal_amount_min: int = 14000,
+    deal_amount_max: int = 72000,
+    gross_profit_min: int = 900,
+    gross_profit_max: int = 4500,
+    activities_min: int = 4,
+    activities_max: int = 12,
     contact_rate: float | None = None,
     appointment_rate: float | None = None,
     showroom_rate: float | None = None,
@@ -975,6 +1037,7 @@ def generate_events(
     month_shape: str = "flat",
     scenarios: list[str] | None = None,
     scenario_overrides: dict[str, dict[str, Any]] | None = None,
+    today_time_cap: "datetime | None" = None,
 ) -> list[Event]:
     rng = random.Random(seed)
     events: list[Event] = []
@@ -1006,7 +1069,7 @@ def generate_events(
     day_weights: list[float] = []
     for day_offset in range(days):
         day = start_date + timedelta(days=day_offset)
-        w = daily_weight(day.day, month_shape)
+        w = daily_weight(day, month_shape)
         # High-heat weekend: first N days get extra leads
         if sc.high_heat_day_count > 0 and day_offset < sc.high_heat_day_count:
             w *= sc.high_heat_day_lead_mult
@@ -1027,7 +1090,7 @@ def generate_events(
         if month_key not in months_with_quota:
             months_with_quota.add(month_key)
             for rep_id in quota_rep_ids:
-                quota = rng.randint(8, 20)
+                quota = rng.randint(8, 15)
                 old_quota = max(0, quota + rng.randint(-3, 0))
                 events.append(
                     Event(
@@ -1068,6 +1131,7 @@ def generate_events(
                 showroom_rate=showroom_rate,
                 negotiation_rate=negotiation_rate,
                 scenario=sc,
+                time_cap=today_time_cap if (today_time_cap and day.date() == today_time_cap.date()) else None,
             )
             events.extend(deal_events)
 

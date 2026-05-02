@@ -72,54 +72,24 @@ def insert_events(database_url: str, rows: Iterable[Mapping[str, Any]]) -> tuple
                 rep_id_map: dict[str, str] = {}
                 if rep_ids:
                     unique_rep_ids = sorted(set(rep_ids))
+                    # Resolve DealMaker employee UUIDs → internal profile UUIDs
+                    # via reps.employee_external_id (set during onboarding).
                     cur.execute(
                         """
-                        SELECT id::text
-                        FROM profiles
-                        WHERE id = ANY(%s)
+                        SELECT employee_external_id::text, id::text
+                        FROM reps
+                        WHERE employee_external_id = ANY(%s)
                         """,
                         (unique_rep_ids,),
                     )
-                    existing_profile_ids = {str(row[0]) for row in cur.fetchall()}
+                    rep_id_map = {str(ext_id): str(profile_id) for ext_id, profile_id in cur.fetchall()}
 
-                    missing_rep_ids = [rep_id for rep_id in unique_rep_ids if rep_id not in existing_profile_ids]
-
-                    fallback_profile_ids: list[str] = []
-                    if missing_rep_ids:
-                        cur.execute(
-                            """
-                            SELECT id::text, email
-                            FROM auth.users
-                            ORDER BY created_at ASC
-                            """
-                        )
-                        auth_users = [(str(user_id), str(email)) for user_id, email in cur.fetchall() if user_id]
-
-                        if not auth_users:
-                            return 0, [
-                                "No auth.users rows available to satisfy events.sales_rep_id -> profiles.id FK. "
-                                "Create at least one user/profile or pass explicit valid --sales-rep-ids."
-                            ]
-
-                        cur.executemany(
-                            """
-                            INSERT INTO profiles (id, email, role)
-                            VALUES (%s::uuid, %s, 'sales_rep')
-                            ON CONFLICT (id) DO NOTHING
-                            """,
-                            auth_users,
-                        )
-                        fallback_profile_ids = [user_id for user_id, _ in auth_users]
-
-                    fallback_index = 0
-                    for rep_id in unique_rep_ids:
-                        if rep_id in existing_profile_ids:
-                            rep_id_map[rep_id] = rep_id
-                        elif fallback_profile_ids:
-                            rep_id_map[rep_id] = fallback_profile_ids[fallback_index % len(fallback_profile_ids)]
-                            fallback_index += 1
-                        else:
-                            rep_id_map[rep_id] = rep_id
+                    unmapped = [r for r in unique_rep_ids if r not in rep_id_map]
+                    if unmapped:
+                        return 0, [
+                            f"DealMaker rep ID(s) not mapped via employee_external_id: {unmapped}. "
+                            "Set employee_external_id on the corresponding reps rows."
+                        ]
 
                 cur.executemany(
                     """
@@ -140,6 +110,37 @@ def insert_events(database_url: str, rows: Iterable[Mapping[str, Any]]) -> tuple
         return len(materialized_rows), []
     except Exception as exc:
         return 0, [str(exc)]
+
+
+def clear_events_for_reps(database_url: str, rep_ids: list[str]) -> dict[str, Any]:
+    """Delete all events rows whose sales_rep_id is in `rep_ids`.
+
+    Used by the store-reset flow to wipe only that store's data without
+    touching other stores' events or non-events tables.
+    """
+    dsn = (database_url or database_url_from_env()).strip()
+    if not dsn:
+        return {"ok": False, "error": "DATABASE_URL not configured."}
+    if not rep_ids:
+        return {"ok": True, "deleted": 0}
+
+    try:
+        import psycopg
+    except ImportError:
+        return {"ok": False, "error": "psycopg is not installed."}
+
+    try:
+        with psycopg.connect(dsn, connect_timeout=15) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM events WHERE sales_rep_id = ANY(%s::uuid[])",
+                    ([str(r) for r in rep_ids],),
+                )
+                deleted = cur.rowcount
+            conn.commit()
+        return {"ok": True, "deleted": deleted}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def clear_public_tables(database_url: str | None = None) -> dict[str, Any]:

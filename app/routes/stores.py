@@ -9,6 +9,7 @@ GET  /stores/<id>/edit   → edit store form (pre-populated)
 POST /stores/<id>/edit   → save edits in-place
 POST /stores/<id>/delete      → remove store from session + persistence
 POST /stores/<id>/backfill    → generate historical data for a date range
+POST /stores/<id>/reset       → clear DB events + re-run 90-day backfill through today
 GET  /stores/<id>/sync-info   → JSON: rep UUIDs + sim params for TopRep alignment
 POST /stores/<id>/provision   → provision QA auth users for all reps
 POST /stores/<id>/deprovision → delete provisioned auth users
@@ -18,12 +19,12 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 
-from dealmaker_postgres import database_url_from_env, is_postgres_dsn
+from dealmaker_postgres import clear_events_for_reps, database_url_from_env, is_postgres_dsn
 from app.supabase_client import (
     deprovision_store_reps,
     get_profiles,
@@ -43,13 +44,121 @@ sys.path.insert(0, str(_APP_ROOT))
 from dealmaker_generator import (  # noqa: E402
     ARCHETYPES,
     SCENARIO_REGISTRY,
+    TeamMember,
     build_team,
     generate_events,
     normalize_delivery_url,
+    sales_rep_uuid,
     send_events_to_api,
 )
 
 bp = Blueprint("stores", __name__)
+
+TOPREP_TEST_STORE_ID = "toprep-api-test"
+TOPREP_TEST_EMPLOYEES: list[dict] = [
+    {"member_id": "S-001", "role": "sales", "name": "Avery Johnson", "archetype": "rockstar"},
+    {"member_id": "S-002", "role": "sales", "name": "Jordan Lee", "archetype": "solid_mid"},
+    {"member_id": "S-003", "role": "sales", "name": "Morgan Patel", "archetype": "solid_mid"},
+    {"member_id": "S-004", "role": "sales", "name": "Riley Smith", "archetype": "solid_mid"},
+    {"member_id": "S-005", "role": "sales", "name": "Casey Nguyen", "archetype": "underperformer"},
+    {"member_id": "S-006", "role": "sales", "name": "Taylor Brooks", "archetype": "new_hire"},
+    {"member_id": "M-001", "role": "manager", "name": "Sam Carter", "archetype": "solid_mid"},
+]
+
+
+def _toprep_test_store_defaults() -> dict:
+    return {
+        "dealership_id": TOPREP_TEST_STORE_ID,
+        "display_name": "TopRep API Test Store",
+        "description": "Static standalone store for TopRep Fortellis/API ingestion testing.",
+        "is_static_test_store": True,
+        "static_team": TOPREP_TEST_EMPLOYEES,
+        "salespeople": 6,
+        "managers": 1,
+        "bdc_agents": 0,
+        "daily_leads": 25,
+        "lead_sources": ["internet", "phone", "showroom"],
+        "deal_statuses": ["lead", "qualified", "proposal", "negotiation", "closed_won", "closed_lost"],
+        "activity_types": ["call", "email", "meeting", "demo", "note"],
+        "activity_outcomes": ["connected", "appt_set", "showed", "sold", "follow_up"],
+        "deal_amount_min": 14000,
+        "deal_amount_max": 72000,
+        "gross_profit_min": 900,
+        "gross_profit_max": 4500,
+        "close_rate_pct": 36,
+        "status_advance_pct": 88,
+        "activities_per_deal_min": 4,
+        "activities_per_deal_max": 12,
+        "archetype_dist": {"rockstar": 1, "solid_mid": 3, "underperformer": 1, "new_hire": 1},
+        "new_hire_dates": [],
+        "month_shape": "realistic",
+        "default_scenarios": [],
+        "delivery": "api",
+        "batch_days": 1,
+        "every_seconds": 10,
+        "seed": 20260501,
+        "sim_speed_preset": "1day_per_minute",
+        "sim_speed_multiplier": 1440.0,
+        "sim_days_total": 0,
+        "sim_start_date": "",
+        "status": "stopped",
+        "events_sent": 0,
+        "credentials": [],
+    }
+
+
+def _ensure_builtin_stores(stores: dict[str, dict]) -> bool:
+    """Add immutable built-in identity for the TopRep API test store.
+
+    Store settings can still be edited later, but the employee roster remains
+    fixed so Fortellis employee IDs and TopRep rep mappings are stable.
+    """
+    changed = False
+    if TOPREP_TEST_STORE_ID not in stores:
+        stores[TOPREP_TEST_STORE_ID] = _toprep_test_store_defaults()
+        return True
+
+    store = stores[TOPREP_TEST_STORE_ID]
+    for key, value in {
+        "dealership_id": TOPREP_TEST_STORE_ID,
+        "display_name": "TopRep API Test Store",
+        "description": "Static standalone store for TopRep Fortellis/API ingestion testing.",
+        "is_static_test_store": True,
+        "static_team": TOPREP_TEST_EMPLOYEES,
+        "salespeople": 6,
+        "managers": 1,
+        "bdc_agents": 0,
+    }.items():
+        if store.get(key) != value:
+            store[key] = value
+            changed = True
+    return changed
+
+
+def build_store_team(store: dict) -> list[TeamMember]:
+    static_team = store.get("static_team")
+    if isinstance(static_team, list) and static_team:
+        team: list[TeamMember] = []
+        for raw in static_team:
+            if not isinstance(raw, dict):
+                continue
+            team.append(
+                TeamMember(
+                    member_id=str(raw.get("member_id", "")),
+                    role=str(raw.get("role", "sales")),
+                    name=str(raw.get("name", raw.get("member_id", ""))),
+                    archetype=str(raw.get("archetype", "solid_mid")),
+                )
+            )
+        return [member for member in team if member.member_id]
+
+    return build_team(
+        salespeople=store.get("salespeople", 0),
+        managers=store.get("managers", 0),
+        bdc_agents=0,
+        archetype_dist=store.get("archetype_dist"),
+        new_hire_dates=_parse_hire_dates(store),
+    )
 
 # ---------------------------------------------------------------------------
 # Persistence helpers
@@ -157,7 +266,7 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         except ValueError:
             raw_sim_start = ""
 
-    return {
+    parsed = {
         "dealership_id": store_id,
         "salespeople": int(data.get("salespeople", 8)),
         "managers": int(data.get("managers", 2)),
@@ -193,12 +302,23 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         "events_sent": (existing or {}).get("events_sent", 0),
         "credentials": (existing or {}).get("credentials", []),
     }
+    if existing and existing.get("is_static_test_store"):
+        parsed["display_name"] = existing.get("display_name", parsed["dealership_id"])
+        parsed["description"] = existing.get("description", "")
+        parsed["is_static_test_store"] = True
+        parsed["static_team"] = existing.get("static_team", [])
+        parsed["salespeople"] = existing.get("salespeople", parsed["salespeople"])
+        parsed["managers"] = existing.get("managers", parsed["managers"])
+        parsed["bdc_agents"] = existing.get("bdc_agents", 0)
+    return parsed
 
 
 # ---------------------------------------------------------------------------
 # In-memory store registry (backed by JSON file)
 # ---------------------------------------------------------------------------
 _stores: dict[str, dict] = _load_stores()
+if _ensure_builtin_stores(_stores):
+    _save_stores(_stores)
 
 # Reset runtime-only fields on startup
 for _s in _stores.values():
@@ -214,17 +334,21 @@ for _s in _stores.values():
 
 
 STORE_TEMPLATES = {
+    # close_rate_pct is the blended base rate; source-specific multipliers in the
+    # generator further adjust it (internet ~40%, phone ~82%, showroom ~155%).
     "custom": {"label": "Custom (blank)", "salespeople": 8, "managers": 2,
                "daily_leads": 20, "close_rate_pct": 36, "month_shape": "flat",
                "archetype_dist": {"rockstar": 1, "solid_mid": 5, "underperformer": 1, "new_hire": 1}},
+    # ~60% internet mix → blended ≈20-22% close rate; 40 leads/day realistic for BDC-driven stores
     "high_volume_internet": {"label": "High-Volume Internet Store", "salespeople": 12, "managers": 3,
-                             "daily_leads": 40, "close_rate_pct": 30, "month_shape": "realistic",
+                             "daily_leads": 40, "close_rate_pct": 32, "month_shape": "realistic",
                              "archetype_dist": {"rockstar": 2, "solid_mid": 7, "underperformer": 2, "new_hire": 1}},
+    # Rural walk-in skews heavily toward showroom source; higher close rate is realistic
     "rural_walkin": {"label": "Rural Walk-In Store", "salespeople": 4, "managers": 1,
-                     "daily_leads": 8, "close_rate_pct": 45, "month_shape": "realistic",
+                     "daily_leads": 8, "close_rate_pct": 42, "month_shape": "realistic",
                      "archetype_dist": {"rockstar": 1, "solid_mid": 2, "underperformer": 1, "new_hire": 0}},
     "manager_phone_store": {"label": "Manager-Led Phone Store", "salespeople": 6, "managers": 2,
-                             "daily_leads": 25, "close_rate_pct": 33, "month_shape": "realistic",
+                             "daily_leads": 25, "close_rate_pct": 34, "month_shape": "realistic",
                              "archetype_dist": {"rockstar": 1, "solid_mid": 4, "underperformer": 1, "new_hire": 0}},
 }
 
@@ -258,7 +382,13 @@ _FORM_CONTEXT = dict(
 
 @bp.route("/")
 def index():
-    return render_template("stores/list.html", stores=list(_stores.values()))
+    toprep_test_store = _stores.get(TOPREP_TEST_STORE_ID)
+    stores = [s for s in _stores.values() if s.get("dealership_id") != TOPREP_TEST_STORE_ID]
+    return render_template(
+        "stores/list.html",
+        stores=stores,
+        toprep_test_store=toprep_test_store,
+    )
 
 
 @bp.route("/stores/new", methods=["GET"])
@@ -382,6 +512,9 @@ def store_detail(store_id: str):
 
 @bp.route("/stores/<store_id>/delete", methods=["POST"])
 def delete_store(store_id: str):
+    if store_id == TOPREP_TEST_STORE_ID:
+        flash("The TopRep API test store is built in and cannot be deleted.", "warning")
+        return redirect(url_for("stores.store_detail", store_id=store_id))
     _stores.pop(store_id, None)
     _save_stores(_stores)
     flash(f"Store '{store_id}' deleted.", "info")
@@ -400,15 +533,7 @@ def sync_info(store_id: str):
     if not store:
         return jsonify({"error": "Store not found"}), 404
 
-    from dealmaker_generator import build_team, sales_rep_uuid
-
-    team = build_team(
-        salespeople=store["salespeople"],
-        managers=store["managers"],
-        bdc_agents=0,
-        archetype_dist=store.get("archetype_dist"),
-        new_hire_dates=_parse_hire_dates(store),
-    )
+    team = build_store_team(store)
 
     reps = []
     for member in team:
@@ -439,6 +564,31 @@ def sync_info(store_id: str):
 
     payload = {
         "dealership_id": store_id,
+        "fortellis_mock": {
+            "base_url": request.host_url.rstrip("/"),
+            "subscription_id": store_id,
+            "auth": {
+                "token_url": f"{request.host_url.rstrip('/')}/oauth2/aus1p1ixy7YL8cMq02p7/v1/token",
+                "token_type": "Bearer",
+                "credentials": "mock credentials are accepted; the token endpoint returns a static test token",
+            },
+            "headers": {
+                "Subscription-Id": store_id,
+                "Authorization": "Bearer mock-fortellis-token",
+            },
+            "endpoints": {
+                "activity_types": "/sales/v1/elead/activities/activityTypes",
+                "opportunities": "/sales/v2/elead/opportunities/search",
+                "sold_deals": "/sales/v2/elead/opportunities/search?status=sold",
+                "activity_history": "/sales/v1/elead/activities/history/byOpportunityId/{opportunityId}",
+                "employees": "/sales/v1/elead/reference/employees",
+            },
+            "rep_mapping": {
+                "fortellis_employee_field": "employeeId",
+                "toprep_rep_field": "employee_external_id",
+                "value_source": "DealMaker member_id values such as S-001",
+            },
+        },
         "simulation": {
             "start_date": sim_start,
             "total_days": sim_days if sim_days else "indefinite",
@@ -482,13 +632,7 @@ def backfill_store(store_id: str):
 
     days = max(1, (end_dt - start_dt).days + 1)
 
-    team = build_team(
-        salespeople=store["salespeople"],
-        managers=store["managers"],
-        bdc_agents=0,
-        archetype_dist=store.get("archetype_dist"),
-        new_hire_dates=_parse_hire_dates(store),
-    )
+    team = build_store_team(store)
 
     scenarios = request.form.getlist("scenarios") or store.get("default_scenarios", [])
     month_shape = request.form.get("month_shape", store.get("month_shape", "flat"))
@@ -542,6 +686,103 @@ def backfill_store(store_id: str):
         "file": str(out_file),
         "api_errors": errors_count if delivery in {"api", "both"} else None,
     })
+
+
+@bp.route("/stores/<store_id>/reset", methods=["POST"])
+def reset_store_data(store_id: str):
+    """Clear all DB events for this store's reps then run a fresh 90-day backfill
+    through today.  Today's events are capped at the current wall-clock time so
+    they appear as already-occurred when users log in immediately after the reset.
+    """
+    store = _stores.get(store_id)
+    if not store:
+        return jsonify({"error": "Store not found"}), 404
+
+    days = int(request.form.get("days", 90))
+    delivery = request.form.get("delivery", store.get("delivery", "api"))
+
+    # ── 1. Delete existing events for this store's reps ──────────────────
+    db_url = database_url_from_env()
+    deleted = 0
+    delete_error: str | None = None
+    if db_url and is_postgres_dsn(db_url):
+        credentials = store.get("credentials") or []
+        rep_ids = [c["user_id"] for c in credentials if isinstance(c, dict) and c.get("user_id") and not c.get("error")]
+        if rep_ids:
+            result = clear_events_for_reps(db_url, rep_ids)
+            deleted = result.get("deleted", 0)
+            if not result.get("ok"):
+                delete_error = result.get("error", "Unknown error clearing events")
+
+    # ── 2. Generate backfill: (days-1) days of history + today ───────────
+    now = datetime.now(timezone.utc)
+    start_dt = (now - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    team = build_store_team(store)
+
+    events = generate_events(
+        start_date=start_dt,
+        days=days,
+        daily_leads=store["daily_leads"],
+        team=team,
+        dealership_id=store_id,
+        seed=store.get("seed", 20260501),
+        base_close_rate=store.get("close_rate_pct", 36) / 100.0,
+        deal_amount_min=store.get("deal_amount_min", 14000),
+        deal_amount_max=store.get("deal_amount_max", 72000),
+        gross_profit_min=store.get("gross_profit_min", 900),
+        gross_profit_max=store.get("gross_profit_max", 4500),
+        activities_min=store.get("activities_per_deal_min", 4),
+        activities_max=store.get("activities_per_deal_max", 12),
+        month_shape=store.get("month_shape", "realistic"),
+        scenarios=store.get("default_scenarios", []),
+        today_time_cap=now,
+    )
+
+    # ── 3. Write to file ──────────────────────────────────────────────────
+    output_dir = _resolve_output_dir() / "stores"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_file = output_dir / f"{store_id}_reset_{now.strftime('%Y%m%d_%H%M%S')}.jsonl"
+    with out_file.open("w", encoding="utf-8") as fh:
+        for ev in events:
+            fh.write(json.dumps(ev.to_dict(), separators=(",", ":")) + "\n")
+
+    # ── 4. Push to API ────────────────────────────────────────────────────
+    api_errors = 0
+    api_error_msg: str | None = None
+    if delivery in {"api", "both"}:
+        raw_url = os.getenv("TOPREP_API_URL", "").strip() or db_url or _supabase_api_url()
+        api_url = normalize_delivery_url(raw_url)
+        service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        user_jwt = os.getenv("TOPREP_AUTH_TOKEN", "").strip()
+        is_rest_write = "/rest/v1/" in api_url
+        auth_token = (service_key if is_rest_write and service_key else user_jwt or service_key)
+        supabase_apikey = os.getenv("SUPABASE_ANON_KEY", "") or _supabase_anon_key()
+        if not auth_token:
+            return jsonify({
+                "error": "Authentication failed — set TOPREP_AUTH_TOKEN or SUPABASE_SERVICE_ROLE_KEY.",
+            }), 401
+        if api_url:
+            result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
+            api_errors = result["failed"]
+            if api_errors and result.get("errors"):
+                api_error_msg = str(result["errors"][0])[:200]
+
+    response: dict = {
+        "ok": not api_error_msg and not delete_error,
+        "events_generated": len(events),
+        "days": days,
+        "start_date": start_dt.date().isoformat(),
+        "end_date": now.date().isoformat(),
+        "deleted_from_db": deleted,
+        "api_errors": api_errors if delivery in {"api", "both"} else None,
+    }
+    if delete_error:
+        response["delete_warning"] = delete_error
+    if api_error_msg:
+        response["api_error_detail"] = api_error_msg
+    return jsonify(response)
 
 
 @bp.route("/stores/<store_id>/provision", methods=["POST"])

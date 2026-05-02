@@ -73,6 +73,7 @@ body {
 .btn--primary  { background: var(--primary); color: #fff; }
 .btn--success  { background: var(--success); color: #0f1117; }
 .btn--danger   { background: var(--danger);  color: #0f1117; }
+.btn--warning  { background: var(--warning, #f59e0b); color: #0f1117; }
 .btn--ghost    { background: transparent; border-color: var(--border); color: var(--text); }
 .btn--sm       { padding: 4px 10px; font-size: 12px; }
 .btn-row       { display: flex; gap: 10px; }

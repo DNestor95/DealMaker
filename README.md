@@ -74,6 +74,54 @@ The test suite (56 tests) proves that:
 - `created_at` (optional per TopRep schema) is always sent for backfill fidelity.
 - All five event types are generated in a normal simulation run.
 
+## Fortellis-shaped ingestion test for TopRep
+
+DealMaker also exposes a local Fortellis / CDK Elead-compatible mock API, so
+TopRep can test its real Fortellis ingestion client without calling Fortellis.
+
+1. Start the DealMaker web app:
+
+```bash
+python run.py
+```
+
+2. Open the built-in `TopRep API Test Store`. Its `Dealership ID` is
+   `toprep-api-test`, and its employee roster is static for stable TopRep rep
+   mapping. Custom stores can still be created later from `+ New Store`.
+
+3. In TopRep's Fortellis integration config, point the provider at DealMaker:
+
+```text
+base_url:        http://localhost:5050
+subscription_id: toprep-api-test
+token_url:       http://localhost:5050/oauth2/aus1p1ixy7YL8cMq02p7/v1/token
+```
+
+The mock accepts any token request credentials and returns
+`mock-fortellis-token`. TopRep requests must send:
+
+```text
+Authorization: Bearer mock-fortellis-token
+Subscription-Id: toprep-api-test
+```
+
+Available Fortellis-shaped endpoints:
+
+```text
+GET  /sales/v1/elead/activities/activityTypes
+GET  /sales/v2/elead/opportunities/search
+GET  /sales/v2/elead/opportunities/search?status=sold
+GET  /sales/v1/elead/activities/history/byOpportunityId/{opportunityId}
+GET  /sales/v1/elead/reference/employees
+POST /fortellis-mock/clear-cache
+GET  /fortellis-mock/status
+```
+
+Rep mapping: Fortellis `employeeId` / `salesPersonId` values are static
+DealMaker member IDs such as `S-001`. Set TopRep `reps.employee_external_id`
+to those values so imported leads, deals, and activities resolve to the
+expected reps.
+
 ## Clear Database (schema-aware)
 
 Use this command to clear all data from the Postgres public schema after
@@ -335,4 +383,3 @@ testing from anywhere without running a local server.
   environment variables for durable configuration.
 - Static assets (`/static/…`) are served directly from Vercel's CDN — no
   extra configuration needed.
-

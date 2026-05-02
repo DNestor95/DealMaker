@@ -37,7 +37,6 @@ _APP_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_APP_ROOT))
 
 from dealmaker_generator import (  # noqa: E402
-    build_team,
     generate_events,
     sales_rep_uuid,
 )
@@ -81,15 +80,9 @@ def _build_dataset(dealership_id: str, store: dict) -> dict:
           "employees":  list[dict],       # FortellisEmployee shape
         }
     """
-    from app.routes.stores import _parse_hire_dates  # noqa: PLC0415
+    from app.routes.stores import build_store_team  # noqa: PLC0415
 
-    team = build_team(
-        salespeople=store.get("salespeople", 8),
-        managers=store.get("managers", 2),
-        bdc_agents=0,
-        archetype_dist=store.get("archetype_dist"),
-        new_hire_dates=_parse_hire_dates(store),
-    )
+    team = build_store_team(store)
 
     # Build rep UUID → member_id reverse map so we can set salesPersonId
     uuid_to_member: dict[str, str] = {}

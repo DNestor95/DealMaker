@@ -400,6 +400,10 @@ def provision_store_reps(store_config: dict) -> list[dict]:
     store_id = store_config.get("dealership_id", "unknown")
     # Build a slug: lowercase, replace non-alphanum with hyphen
     store_slug = re.sub(r"[^a-z0-9]+", "-", store_id.lower()).strip("-")
+    static_team = store_config.get("static_team")
+    if isinstance(static_team, list) and static_team:
+        return _provision_static_store_team(store_config, static_team)
+
     archetype_dist: dict[str, int] = store_config.get("archetype_dist", {})
     salespeople = store_config.get("salespeople", 0)
     managers = store_config.get("managers", 0)
@@ -530,6 +534,92 @@ def provision_store_reps(store_config: dict) -> list[dict]:
             "rep_name": f"Manager {i}",
             "role": "manager",
             "archetype": "manager",
+            "email": email,
+            "password": password,
+            "user_id": user_id,
+        })
+
+    return credentials
+
+
+def _provision_static_store_team(store_config: dict, static_team: list[dict]) -> list[dict]:
+    store_id = store_config.get("dealership_id", "unknown")
+    store_slug = re.sub(r"[^a-z0-9]+", "-", store_id.lower()).strip("-")
+    store_uuid = _store_uuid(store_id)
+    credentials: list[dict] = []
+    role_counters: dict[str, int] = {}
+
+    for member in static_team:
+        if not isinstance(member, dict):
+            continue
+        member_id = str(member.get("member_id", "")).strip()
+        if not member_id:
+            continue
+
+        role = str(member.get("role", "sales"))
+        profile_role = "manager" if role == "manager" else "sales_rep"
+        archetype = str(member.get("archetype", "solid_mid"))
+        rep_name = str(member.get("name", member_id))
+        first_name, _, last_name = rep_name.partition(" ")
+        if not last_name:
+            last_name = member_id
+
+        prefix = "mgr" if role == "manager" else "rep"
+        role_counters[prefix] = role_counters.get(prefix, 0) + 1
+        email = f"sim-{store_slug}-{prefix}{role_counters[prefix]}@test.com"
+        password = "test123"
+        user_uuid = _rep_uuid(store_id, member_id)
+
+        result = admin_create_user(email, password, user_id=user_uuid)
+        if "error" in result:
+            error_text = str(result.get("error", ""))
+            if "already" in error_text.lower() or result.get("status") == 422:
+                user_id: str | None = user_uuid
+            else:
+                credentials.append({
+                    "rep_name": rep_name,
+                    "role": profile_role,
+                    "archetype": archetype,
+                    "member_id": member_id,
+                    "email": email,
+                    "password": password,
+                    "user_id": None,
+                    "error": error_text,
+                })
+                continue
+        else:
+            user_id = result.get("id") or result.get("user", {}).get("id") or user_uuid
+
+        if user_id:
+            profile_body = {
+                "id": user_id,
+                "email": email,
+                "first_name": first_name,
+                "last_name": last_name,
+                "role": profile_role,
+                "store_id": store_uuid,
+            }
+            rest_post_with_headers(
+                path="profiles",
+                body=profile_body,
+                headers={**_service_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
+            reps_body = {
+                "id": user_id,
+                "store_id": store_uuid,
+                "employee_external_id": member_id,
+            }
+            rest_post_with_headers(
+                path="reps",
+                body=reps_body,
+                headers={**_service_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
+
+        credentials.append({
+            "rep_name": rep_name,
+            "role": profile_role,
+            "archetype": archetype,
+            "member_id": member_id,
             "email": email,
             "password": password,
             "user_id": user_id,

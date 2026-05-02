@@ -2,9 +2,14 @@
 {% block title %}— {{ store.dealership_id }}{% endblock %}
 {% block content %}
 <div class="page-header">
-  <h1>{{ store.dealership_id }}</h1>
+  <h1>{{ store.display_name | default(store.dealership_id, true) }}</h1>
   <span class="badge badge--{{ store.status }}" id="store-status">{{ store.status }}</span>
 </div>
+{% if store.is_static_test_store %}
+<p class="hint" style="margin-top:-18px;margin-bottom:22px">
+  Static TopRep API test store: the employee roster and external IDs are fixed, while store settings can be edited and persisted.
+</p>
+{% endif %}
 
 <div class="detail-grid">
 
@@ -37,10 +42,21 @@
       <div class="btn-row">
         <a class="btn btn--sm btn--ghost" href="{{ url_for('stores.edit_store', store_id=store.dealership_id) }}">✏ Edit Store</a>
         <a class="btn btn--sm btn--ghost" href="{{ url_for('simulation.report', store_id=store.dealership_id) }}">📊 View Report</a>
+        {% if not store.is_static_test_store %}
         <form method="POST" action="{{ url_for('stores.delete_store', store_id=store.dealership_id) }}"
               onsubmit="return confirm('Delete store {{ store.dealership_id }}?')" style="display:inline">
           <button class="btn btn--sm btn--danger" type="submit">🗑 Delete Store</button>
         </form>
+        {% endif %}
+      </div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn btn--sm btn--warning" id="btn-reset" onclick="confirmReset('{{ store.dealership_id }}', '{{ store.delivery | default('api') }}')">
+          🔄 Reset Data
+        </button>
+      </div>
+      <div id="reset-status" style="margin-top:10px;display:none">
+        <span id="reset-spinner" class="hint">Resetting data… this may take 30–60 seconds.</span>
+        <pre id="reset-result" class="code-block" style="display:none;margin-top:8px"></pre>
       </div>
     </div>
   </section>
@@ -57,8 +73,40 @@
       <tr><td>Status Advance</td><td>{{ store.status_advance_pct }}%</td></tr>
       <tr><td>Activities / Deal</td><td>{{ store.activities_per_deal_min }}–{{ store.activities_per_deal_max }}</td></tr>
       <tr><td>Month Shape</td><td>{{ store.month_shape | default('flat') }}</td></tr>
+      {% if store.is_static_test_store %}
+      <tr><td>Store Type</td><td>Static TopRep API test store</td></tr>
+      {% endif %}
     </table>
   </section>
+
+  {% if store.static_team %}
+  <section class="card card--wide">
+    <h2>Static Employees</h2>
+    <p class="hint" style="margin-bottom:12px">
+      These employee IDs are stable and should be used as TopRep <code>reps.employee_external_id</code> values.
+    </p>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Employee ID</th>
+          <th>Name</th>
+          <th>Role</th>
+          <th>Archetype</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for employee in store.static_team %}
+        <tr>
+          <td><code>{{ employee.member_id }}</code></td>
+          <td>{{ employee.name }}</td>
+          <td>{{ employee.role }}</td>
+          <td><span class="tag">{{ employee.archetype | replace('_', ' ') }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
 
   <!-- ── Time Acceleration ─── -->
   <section class="card">
@@ -326,6 +374,20 @@
       <button class="btn btn--sm btn--ghost" onclick="copySyncInfo()">📋 Copy JSON</button>
     </div>
 
+    <div class="form-row-group" style="margin-bottom:16px">
+      <div style="background:var(--bg-card-alt, var(--bg));border:1px solid var(--border);border-radius:6px;padding:12px 16px">
+        <h3 style="font-size:13px;margin-bottom:8px">Fortellis Mock for TopRep</h3>
+        <table class="kv-table" style="margin:0">
+          <tr><td>Base URL</td><td><code>{{ request.host_url.rstrip('/') }}</code></td></tr>
+          <tr><td>Subscription ID</td><td><code>{{ store.dealership_id }}</code></td></tr>
+          <tr><td>Token URL</td><td><code>/oauth2/aus1p1ixy7YL8cMq02p7/v1/token</code></td></tr>
+          <tr><td>Opportunities</td><td><code>/sales/v2/elead/opportunities/search</code></td></tr>
+          <tr><td>Employees</td><td><code>/sales/v1/elead/reference/employees</code></td></tr>
+          <tr><td>Rep mapping</td><td><code>employeeId</code> → TopRep <code>reps.employee_external_id</code></td></tr>
+        </table>
+      </div>
+    </div>
+
     <!-- Sim params summary -->
     <div class="form-row-group" style="margin-bottom:16px">
       <div style="background:var(--bg-card-alt, var(--bg));border:1px solid var(--border);border-radius:6px;padding:12px 16px">
@@ -539,6 +601,59 @@ if (_syncSection && 'IntersectionObserver' in window) {
   }, { threshold: 0.1 }).observe(_syncSection);
 } else if (_syncSection) {
   loadSyncInfo();
+}
+
+function confirmReset(storeId, delivery) {
+  const msg = [
+    'Reset store data for "' + storeId + '"?',
+    '',
+    'This will:',
+    '  1. Delete all existing events for this store\'s reps from the database.',
+    '  2. Re-generate 90 days of data through TODAY (calls included up to now).',
+    '  3. Push the new events via ' + delivery + '.',
+    '',
+    'The simulation will NOT be stopped automatically — stop it first if running.',
+    '',
+    'Proceed?'
+  ].join('\n');
+
+  if (!confirm(msg)) return;
+
+  const btn = document.getElementById('btn-reset');
+  const statusDiv = document.getElementById('reset-status');
+  const spinner = document.getElementById('reset-spinner');
+  const resultPre = document.getElementById('reset-result');
+
+  btn.disabled = true;
+  statusDiv.style.display = 'block';
+  spinner.style.display = 'inline';
+  resultPre.style.display = 'none';
+
+  const form = new FormData();
+  form.append('days', '90');
+  form.append('delivery', delivery);
+
+  fetch('/stores/' + storeId + '/reset', { method: 'POST', body: form })
+    .then(r => r.json())
+    .then(data => {
+      spinner.style.display = 'none';
+      resultPre.style.display = 'block';
+      resultPre.textContent = JSON.stringify(data, null, 2);
+      if (data.ok) {
+        resultPre.style.color = 'var(--color-success, #2e7d32)';
+      } else {
+        resultPre.style.color = 'var(--color-danger, #b71c1c)';
+      }
+    })
+    .catch(err => {
+      spinner.style.display = 'none';
+      resultPre.style.display = 'block';
+      resultPre.textContent = 'Request failed: ' + err;
+      resultPre.style.color = 'var(--color-danger, #b71c1c)';
+    })
+    .finally(() => {
+      btn.disabled = false;
+    });
 }
 </script>
 {% endblock %}

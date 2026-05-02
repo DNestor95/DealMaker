@@ -6,6 +6,29 @@
   <a class="btn btn--primary" href="{{ url_for('stores.new_store') }}">+ New Store</a>
 </div>
 
+{% if toprep_test_store %}
+<section class="card card--wide" style="margin-bottom:20px">
+  <div style="display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap">
+    <div>
+      <h2>TopRep API Test Store</h2>
+      <p class="hint" style="margin-bottom:12px">
+        Static standalone store for Fortellis-shaped API ingestion tests. Employee IDs are fixed for stable TopRep mapping.
+      </p>
+      <table class="kv-table" style="max-width:720px">
+        <tr><td>Dealership ID</td><td><code>{{ toprep_test_store.dealership_id }}</code></td></tr>
+        <tr><td>Delivery</td><td><code>{{ toprep_test_store.delivery }}</code></td></tr>
+        <tr><td>Employees</td><td>{{ toprep_test_store.static_team | length }} fixed employees</td></tr>
+        <tr><td>Rep mapping</td><td><code>S-001</code> etc. map to TopRep <code>reps.employee_external_id</code></td></tr>
+      </table>
+    </div>
+    <div class="btn-row">
+      <a class="btn btn--primary" href="{{ url_for('stores.store_detail', store_id=toprep_test_store.dealership_id) }}">Open Test Store</a>
+      <a class="btn btn--ghost" href="{{ url_for('stores.sync_info', store_id=toprep_test_store.dealership_id) }}" target="_blank" rel="noopener noreferrer">View API Config</a>
+    </div>
+  </div>
+</section>
+{% endif %}
+
 {% if stores %}
 <table class="table">
   <thead>
