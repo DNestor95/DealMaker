@@ -249,6 +249,25 @@ def test_builtin_toprep_store_migrates_old_inflated_calibration():
     assert stores[TOPREP_TEST_STORE_ID]["close_rate_pct"] == TOPREP_TEST_CLOSE_RATE_PCT
 
 
+def test_toprep_store_reset_rep_ids_include_static_roster_without_credentials():
+    from app.routes.stores import (
+        TOPREP_TEST_STORE_ID,
+        _toprep_test_store_defaults,
+        build_store_team,
+        store_reset_rep_ids,
+    )
+    from dealmaker_generator import sales_rep_uuid
+
+    store = _toprep_test_store_defaults()
+    store["credentials"] = []
+    team = build_store_team(store)
+
+    rep_ids = store_reset_rep_ids(TOPREP_TEST_STORE_ID, store)
+
+    assert sales_rep_uuid(TOPREP_TEST_STORE_ID, team[1]) in rep_ids
+    assert len(rep_ids) == 7
+
+
 def test_builtin_toprep_store_is_added_to_registry():
     from app.routes.stores import TOPREP_TEST_STORE_ID, _ensure_builtin_stores
 

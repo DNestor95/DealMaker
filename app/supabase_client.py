@@ -10,9 +10,12 @@ import re
 import secrets
 import ssl
 import string
+import uuid
+from calendar import monthrange
+from collections import defaultdict
 from http import HTTPStatus
 from pathlib import Path
-from urllib import error, request
+from urllib import error, parse, request
 
 
 def _ssl_ctx() -> ssl.SSLContext:
@@ -644,6 +647,278 @@ def rest_post_with_headers(path: str, body: dict, headers: dict) -> dict:
         return {"error": exc.read().decode("utf-8"), "status": exc.code}
     except Exception as exc:
         return {"error": str(exc)}
+
+
+def clear_rep_data_for_reps(rep_ids: list[str]) -> dict:
+    """Delete rep-scoped materialized data through Supabase REST.
+
+    This is the reset fallback when DealMaker does not have a direct Postgres
+    DSN. It uses service-role headers so RLS does not prevent cleanup. Raw
+    events are append-only in TopRep and are intentionally left intact.
+    """
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not service_key:
+        return {"ok": False, "error": "SUPABASE_SERVICE_ROLE_KEY not configured"}
+    if not rep_ids:
+        return {"ok": True, "deleted": 0, "deleted_by_table": {}}
+
+    base = _base_url()
+    if not base:
+        return {"ok": False, "error": "TOPREP_API_URL not configured"}
+
+    delete_plan = [
+        ("forecast_queue", "rep_id"),
+        ("rep_month_forecast", "rep_id"),
+        ("rep_stage_posteriors", "rep_id"),
+        ("rep_stage_stats", "rep_id"),
+        ("rep_experience", "rep_id"),
+        ("quotas", "rep_id"),
+        ("forecast_runs", "rep_id"),
+        ("activities", "sales_rep_id"),
+        ("deals", "sales_rep_id"),
+        ("rep_month_stats", "rep_id"),
+    ]
+
+    ids_filter = ",".join(str(rep_id) for rep_id in sorted(set(rep_ids)))
+    headers = {**_service_headers(), "Prefer": "return=minimal"}
+    deleted_by_table: dict[str, int | str] = {}
+    errors: list[str] = []
+
+    for table_name, column_name in delete_plan:
+        query = parse.quote(f"{column_name}=in.({ids_filter})", safe="=(),-")
+        url = f"{base}/rest/v1/{table_name}?{query}"
+        req = request.Request(url, headers=headers, method="DELETE")
+        try:
+            with request.urlopen(req, timeout=15, context=_ssl_ctx()) as resp:
+                deleted_by_table[table_name] = resp.status
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:300]
+            # Some TopRep deployments may not have every derived table yet.
+            # Missing tables/columns are non-fatal; auth and syntax errors are.
+            if exc.code in {400, 404} and (
+                "does not exist" in body.lower()
+                or "could not find" in body.lower()
+                or "schema cache" in body.lower()
+            ):
+                continue
+            errors.append(f"{table_name}: HTTP {exc.code}: {body}")
+        except Exception as exc:
+            errors.append(f"{table_name}: {exc}")
+
+    if errors:
+        return {"ok": False, "error": "; ".join(errors[:3]), "deleted_by_table": deleted_by_table}
+    return {"ok": True, "deleted": None, "deleted_by_table": deleted_by_table}
+
+
+def _rest_upsert_rows(path: str, rows: list[dict], on_conflict: str = "id") -> dict:
+    if not rows:
+        return {"ok": True, "inserted": 0}
+    base = _base_url()
+    if not base:
+        return {"ok": False, "error": "TOPREP_API_URL not configured"}
+
+    url = f"{base}/rest/v1/{path}?on_conflict={parse.quote(on_conflict)}"
+    headers = {
+        **_service_headers(),
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    all_keys = sorted({key for row in rows for key in row})
+    normalized_rows = [{key: row.get(key) for key in all_keys} for row in rows]
+    inserted = 0
+    for i in range(0, len(normalized_rows), 500):
+        chunk = normalized_rows[i: i + 500]
+        data = json.dumps(chunk, separators=(",", ":")).encode("utf-8")
+        req = request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with request.urlopen(req, timeout=30, context=_ssl_ctx()):
+                inserted += len(chunk)
+        except error.HTTPError as exc:
+            return {
+                "ok": False,
+                "error": f"{path}: HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')[:500]}",
+                "inserted": inserted,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"{path}: {exc}", "inserted": inserted}
+    return {"ok": True, "inserted": inserted}
+
+
+def _month_key_from_date(value: str | None) -> str | None:
+    if not value or len(value) < 7:
+        return None
+    return value[:7]
+
+
+def _assessed_quota_rows(deals: dict[str, dict]) -> list[dict]:
+    """Set monthly quotas from rep history, falling back to store performance."""
+    rep_ids = sorted({str(row["sales_rep_id"]) for row in deals.values() if row.get("sales_rep_id")})
+    month_keys = sorted({
+        month_key
+        for row in deals.values()
+        for month_key in [_month_key_from_date(str(row.get("created_at") or ""))]
+        if month_key
+    })
+    if not rep_ids or not month_keys:
+        return []
+
+    first_month = month_keys[0]
+    latest_month = month_keys[-1]
+    full_history_months = [month for month in month_keys if month not in {first_month, latest_month}]
+
+    sold_by_rep_month: dict[tuple[str, str], int] = defaultdict(int)
+    active_rep_months: set[tuple[str, str]] = set()
+    for row in deals.values():
+        rep_id = str(row.get("sales_rep_id") or "")
+        created_month = _month_key_from_date(str(row.get("created_at") or ""))
+        if rep_id and created_month:
+            active_rep_months.add((rep_id, created_month))
+        if row.get("status") == "closed_won":
+            sold_month = _month_key_from_date(str(row.get("close_date") or row.get("updated_at") or ""))
+            if rep_id and sold_month:
+                sold_by_rep_month[(rep_id, sold_month)] += 1
+
+    def _bounded_quota(value: float) -> int:
+        return max(6, min(18, int(round(value))))
+
+    quota_rows: list[dict] = []
+    for target_month in month_keys:
+        prior_full_months = [month for month in full_history_months if month < target_month]
+        store_values = [
+            sold_by_rep_month.get((rep_id, month), 0)
+            for month in prior_full_months
+            for rep_id in rep_ids
+            if (rep_id, month) in active_rep_months
+        ]
+        store_baseline = (sum(store_values) / len(store_values)) if store_values else 10.0
+
+        for rep_id in rep_ids:
+            rep_values = [
+                sold_by_rep_month.get((rep_id, month), 0)
+                for month in prior_full_months
+                if (rep_id, month) in active_rep_months
+            ]
+            source_values = rep_values if len(rep_values) >= 2 else [store_baseline]
+            assessed_units = _bounded_quota((sum(source_values) / len(source_values)) * 1.05)
+
+            year, month = (int(part) for part in target_month.split("-"))
+            period_start = f"{target_month}-01"
+            period_end = f"{target_month}-{monthrange(year, month)[1]:02d}"
+            quota_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"quota|{rep_id}|{target_month}"))
+            quota_rows.append({
+                "id": quota_id,
+                "rep_id": rep_id,
+                "period_start": period_start,
+                "period_end": period_end,
+                "quota_units": assessed_units,
+                "created_at": f"{period_start}T08:00:00.000Z",
+            })
+
+    return quota_rows
+
+
+def materialize_events_for_toprep(events: list[dict]) -> dict:
+    """Upsert generated events into TopRep's UI-facing tables."""
+    deals: dict[str, dict] = {}
+    activities: dict[str, dict] = {}
+    activity_type_map = {
+        "call": "call",
+        "email": "email",
+        "meeting": "meeting",
+        "demo": "demo",
+        "note": "note",
+        "appointment": "meeting",
+        "test_drive": "demo",
+        "text": "note",
+        "voicemail": "note",
+        "follow_up": "note",
+        "trade_appraisal": "note",
+        "credit_app": "note",
+        "pencil_presented": "note",
+        "manager_to": "meeting",
+        "delivery": "note",
+        "walk_in": "meeting",
+        "lost_reason": "note",
+    }
+
+    for event in events:
+        payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+        event_type = str(event.get("type", ""))
+        rep_id = str(event.get("sales_rep_id", ""))
+        created_at = str(event.get("created_at", ""))
+        deal_id = payload.get("deal_id")
+
+        if event_type == "deal.created" and deal_id:
+            deals[str(deal_id)] = {
+                "id": str(deal_id),
+                "sales_rep_id": rep_id,
+                "customer_name": str(payload.get("customer_name") or "Unknown Customer"),
+                "deal_amount": float(payload.get("deal_amount") or 0),
+                "gross_profit": float(payload.get("gross_profit") or 0),
+                "status": "lead",
+                "source": str(payload.get("source") or "unknown"),
+                "lead_source": str(payload.get("source") or "unknown"),
+                "lead_source_detail": str(payload.get("raw_source") or payload.get("source") or "unknown"),
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+        elif event_type == "deal.status_changed" and deal_id:
+            row = deals.setdefault(str(deal_id), {
+                "id": str(deal_id),
+                "sales_rep_id": rep_id,
+                "customer_name": "Unknown Customer",
+                "deal_amount": float(payload.get("deal_amount") or 0),
+                "gross_profit": float(payload.get("gross_profit") or 0),
+                "status": "lead",
+                "source": "unknown",
+                "lead_source": "unknown",
+                "created_at": created_at,
+                "updated_at": created_at,
+            })
+            row["status"] = str(payload.get("new_status") or row["status"])
+            row["updated_at"] = created_at
+            if payload.get("deal_amount") is not None:
+                row["deal_amount"] = float(payload.get("deal_amount") or 0)
+            if payload.get("gross_profit") is not None:
+                row["gross_profit"] = float(payload.get("gross_profit") or 0)
+            if payload.get("close_date"):
+                row["close_date"] = str(payload["close_date"])
+
+        if event_type in {"activity.scheduled", "activity.completed"}:
+            activity_id = payload.get("activity_id")
+            if not activity_id or not deal_id:
+                continue
+            row = activities.setdefault(str(activity_id), {
+                "id": str(activity_id),
+                "deal_id": str(deal_id),
+                "sales_rep_id": rep_id,
+                "activity_type": activity_type_map.get(str(payload.get("activity_type") or "note"), "note"),
+                "created_at": created_at,
+            })
+            row["activity_type"] = activity_type_map.get(str(payload.get("activity_type") or row["activity_type"]), "note")
+            row["raw_activity_type"] = str(payload.get("activity_type") or row["activity_type"])
+            if event_type == "activity.scheduled":
+                row["scheduled_at"] = str(payload.get("scheduled_for") or created_at)
+            else:
+                row["completed_at"] = str(payload.get("completed_at") or created_at)
+                row["outcome"] = str(payload.get("outcome") or "")
+                row["description"] = str(payload.get("description") or payload.get("outcome") or event_type)
+                if payload.get("contact_quality_score") is not None:
+                    row["contact_quality_score"] = float(payload["contact_quality_score"])
+                if payload.get("response_time_minutes") is not None:
+                    row["response_time_minutes"] = int(payload["response_time_minutes"])
+                if payload.get("follow_up_sequence") is not None:
+                    row["follow_up_sequence"] = int(payload["follow_up_sequence"])
+
+    deal_result = _rest_upsert_rows("deals", list(deals.values()))
+    if not deal_result.get("ok"):
+        return {"ok": False, "error": deal_result.get("error"), "deals": deal_result, "activities": None, "quotas": None}
+    activity_result = _rest_upsert_rows("activities", list(activities.values()))
+    if not activity_result.get("ok"):
+        return {"ok": False, "error": activity_result.get("error"), "deals": deal_result, "activities": activity_result, "quotas": None}
+    quota_result = _rest_upsert_rows("quotas", _assessed_quota_rows(deals))
+    if not quota_result.get("ok"):
+        return {"ok": False, "error": quota_result.get("error"), "deals": deal_result, "activities": activity_result, "quotas": quota_result}
+    return {"ok": True, "deals": deal_result, "activities": activity_result, "quotas": quota_result}
 
 
 def deprovision_store_reps(store_id: str) -> dict:

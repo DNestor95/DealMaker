@@ -28,8 +28,10 @@ from dealmaker_postgres import clear_events_for_reps, database_url_from_env, is_
 from app.supabase_client import (
     deprovision_store_reps,
     get_profiles,
+    materialize_events_for_toprep,
     priors_from_archetypes,
     provision_store_reps,
+    clear_rep_data_for_reps,
     rest_get,
     seed_source_stage_priors,
     _api_url as _supabase_api_url,
@@ -173,6 +175,20 @@ def build_store_team(store: dict) -> list[TeamMember]:
         archetype_dist=store.get("archetype_dist"),
         new_hire_dates=_parse_hire_dates(store),
     )
+
+
+def store_reset_rep_ids(store_id: str, store: dict) -> list[str]:
+    """Return every known rep UUID that reset should clear for this store."""
+    rep_ids: list[str] = []
+    for cred in store.get("credentials", []) or []:
+        if isinstance(cred, dict) and cred.get("user_id") and not cred.get("error"):
+            rep_ids.append(str(cred["user_id"]))
+
+    for member in build_store_team(store):
+        if member.role in {"sales", "manager", "bdc"}:
+            rep_ids.append(sales_rep_uuid(store_id, member))
+
+    return sorted(set(rep_ids))
 
 # ---------------------------------------------------------------------------
 # Persistence helpers
@@ -723,14 +739,26 @@ def reset_store_data(store_id: str):
     db_url = database_url_from_env()
     deleted = 0
     delete_error: str | None = None
+    rep_ids = store_reset_rep_ids(store_id, store)
     if db_url and is_postgres_dsn(db_url):
-        credentials = store.get("credentials") or []
-        rep_ids = [c["user_id"] for c in credentials if isinstance(c, dict) and c.get("user_id") and not c.get("error")]
         if rep_ids:
             result = clear_events_for_reps(db_url, rep_ids)
             deleted = result.get("deleted", 0)
             if not result.get("ok"):
                 delete_error = result.get("error", "Unknown error clearing events")
+    elif delivery in {"api", "both"}:
+        result = clear_rep_data_for_reps(rep_ids)
+        deleted = result.get("deleted") or 0
+        if not result.get("ok"):
+            delete_error = result.get("error", "Unknown error clearing Supabase data")
+
+    if delete_error and delivery in {"api", "both"}:
+        return jsonify({
+            "ok": False,
+            "error": delete_error,
+            "deleted_from_db": deleted,
+            "rep_ids": len(rep_ids),
+        }), 500
 
     # ── 2. Generate backfill: (days-1) days of history + today ───────────
     now = datetime.now(timezone.utc)
@@ -769,6 +797,7 @@ def reset_store_data(store_id: str):
     # ── 4. Push to API ────────────────────────────────────────────────────
     api_errors = 0
     api_error_msg: str | None = None
+    materialize_result: dict | None = None
     if delivery in {"api", "both"}:
         raw_url = os.getenv("TOPREP_API_URL", "").strip() or db_url or _supabase_api_url()
         api_url = normalize_delivery_url(raw_url)
@@ -794,6 +823,10 @@ def reset_store_data(store_id: str):
                 api_errors += result["failed"]
                 if result.get("errors") and not api_error_msg:
                     api_error_msg = str(result["errors"][0])[:200]
+        if not api_error_msg:
+            materialize_result = materialize_events_for_toprep([event.to_dict() for event in events])
+            if not materialize_result.get("ok"):
+                api_error_msg = str(materialize_result.get("error", "Materialization failed"))[:200]
 
     response: dict = {
         "ok": not api_error_msg and not delete_error,
@@ -804,6 +837,8 @@ def reset_store_data(store_id: str):
         "deleted_from_db": deleted,
         "api_errors": api_errors if delivery in {"api", "both"} else None,
     }
+    if materialize_result is not None:
+        response["materialized"] = materialize_result
     if delete_error:
         response["delete_warning"] = delete_error
     if api_error_msg:
