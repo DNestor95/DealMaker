@@ -201,7 +201,13 @@ def test_sync_info_includes_fortellis_mock_configuration(client):
 
 
 def test_builtin_toprep_store_has_static_team():
-    from app.routes.stores import TOPREP_TEST_STORE_ID, _toprep_test_store_defaults, build_store_team
+    from app.routes.stores import (
+        TOPREP_TEST_CLOSE_RATE_PCT,
+        TOPREP_TEST_DAILY_LEADS,
+        TOPREP_TEST_STORE_ID,
+        _toprep_test_store_defaults,
+        build_store_team,
+    )
     from dealmaker_generator import sales_rep_uuid
 
     store = _toprep_test_store_defaults()
@@ -209,6 +215,8 @@ def test_builtin_toprep_store_has_static_team():
 
     assert store["dealership_id"] == TOPREP_TEST_STORE_ID
     assert store["delivery"] == "api"
+    assert store["daily_leads"] == TOPREP_TEST_DAILY_LEADS
+    assert store["close_rate_pct"] == TOPREP_TEST_CLOSE_RATE_PCT
     assert [member.member_id for member in team] == [
         "S-001",
         "S-002",
@@ -220,6 +228,44 @@ def test_builtin_toprep_store_has_static_team():
     ]
     assert team[0].name == "Avery Johnson"
     assert sales_rep_uuid(TOPREP_TEST_STORE_ID, team[0])
+
+
+def test_builtin_toprep_store_migrates_old_inflated_calibration():
+    from app.routes.stores import (
+        TOPREP_TEST_CLOSE_RATE_PCT,
+        TOPREP_TEST_DAILY_LEADS,
+        TOPREP_TEST_STORE_ID,
+        _ensure_builtin_stores,
+        _toprep_test_store_defaults,
+    )
+
+    store = _toprep_test_store_defaults()
+    store["daily_leads"] = 25
+    store["close_rate_pct"] = 36
+    stores = {TOPREP_TEST_STORE_ID: store}
+
+    assert _ensure_builtin_stores(stores) is True
+    assert stores[TOPREP_TEST_STORE_ID]["daily_leads"] == TOPREP_TEST_DAILY_LEADS
+    assert stores[TOPREP_TEST_STORE_ID]["close_rate_pct"] == TOPREP_TEST_CLOSE_RATE_PCT
+
+
+def test_toprep_store_reset_rep_ids_include_static_roster_without_credentials():
+    from app.routes.stores import (
+        TOPREP_TEST_STORE_ID,
+        _toprep_test_store_defaults,
+        build_store_team,
+        store_reset_rep_ids,
+    )
+    from dealmaker_generator import sales_rep_uuid
+
+    store = _toprep_test_store_defaults()
+    store["credentials"] = []
+    team = build_store_team(store)
+
+    rep_ids = store_reset_rep_ids(TOPREP_TEST_STORE_ID, store)
+
+    assert sales_rep_uuid(TOPREP_TEST_STORE_ID, team[1]) in rep_ids
+    assert len(rep_ids) == 7
 
 
 def test_builtin_toprep_store_is_added_to_registry():

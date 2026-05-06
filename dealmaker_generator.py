@@ -60,7 +60,7 @@ _SOURCE_WEIGHTS = [0.60, 0.20, 0.20]
 # Source-specific conversion adjustments based on industry benchmarks:
 # - Internet: low contact rate (~40%), low close rate (~40% of blended avg)
 # - Phone: medium contact rate (~78%), medium close rate (~82% of blended avg)
-# - Showroom: near-perfect contact (100%), high close rate (~1.55× blended avg)
+# - Showroom: near-perfect contact (100%), high close rate (~1.55x blended avg)
 _SOURCE_RATE_MODS: dict[str, dict[str, float]] = {
     "internet":  {"close": 0.40, "contact": 0.45, "activities_min": 5, "activities_max": 14},
     "phone":     {"close": 0.82, "contact": 0.78, "activities_min": 3, "activities_max": 9},
@@ -162,9 +162,9 @@ class ArchetypeConfig:
 ARCHETYPES: dict[str, ArchetypeConfig] = {
     "rockstar": ArchetypeConfig(
         name="Rockstar",
-        close_rate_mult=2.5,
-        activity_mult=1.2,
-        pipeline_advance_rate=0.97,
+        close_rate_mult=1.8,
+        activity_mult=1.15,
+        pipeline_advance_rate=0.95,
     ),
     "solid_mid": ArchetypeConfig(
         name="Solid Mid",
@@ -174,15 +174,15 @@ ARCHETYPES: dict[str, ArchetypeConfig] = {
     ),
     "underperformer": ArchetypeConfig(
         name="Underperformer",
-        close_rate_mult=0.3,
+        close_rate_mult=0.45,
         activity_mult=0.8,
         pipeline_advance_rate=0.65,
     ),
     "new_hire": ArchetypeConfig(
         name="New Hire (Ramping)",
-        close_rate_mult=0.2,   # base; ramped at simulation time via hire_date
-        activity_mult=0.7,     # base; ramped at simulation time
-        pipeline_advance_rate=0.55,
+        close_rate_mult=0.35,  # base; ramped at simulation time via hire_date
+        activity_mult=0.75,    # base; ramped at simulation time
+        pipeline_advance_rate=0.60,
     ),
 }
 

@@ -92,14 +92,16 @@ def _build_dataset(dealership_id: str, store: dict) -> dict:
     end_date = datetime.now(tz=timezone.utc)
     start_date = end_date - timedelta(days=_DATASET_DAYS)
 
+    from app.routes.stores import DEFAULT_CLOSE_RATE_PCT, DEFAULT_DAILY_LEADS  # noqa: PLC0415
+
     events = generate_events(
         start_date=start_date,
         days=_DATASET_DAYS,
-        daily_leads=store.get("daily_leads", 20),
+        daily_leads=store.get("daily_leads", DEFAULT_DAILY_LEADS),
         team=team,
         dealership_id=dealership_id,
         seed=store.get("seed", 42),
-        base_close_rate=store.get("close_rate_pct", 36) / 100.0,
+        base_close_rate=store.get("close_rate_pct", DEFAULT_CLOSE_RATE_PCT) / 100.0,
         deal_amount_min=store.get("deal_amount_min", 12000),
         deal_amount_max=store.get("deal_amount_max", 68000),
         gross_profit_min=store.get("gross_profit_min", 700),

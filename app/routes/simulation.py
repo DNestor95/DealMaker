@@ -20,7 +20,13 @@ from pathlib import Path
 from flask import Blueprint, jsonify, render_template
 
 from dealmaker_postgres import database_url_from_env, is_postgres_dsn
-from app.routes.stores import SPEED_PRESETS, _OUTPUT_DIR, _stores, build_store_team
+from app.routes.stores import (
+    DEFAULT_CLOSE_RATE_PCT,
+    SPEED_PRESETS,
+    _OUTPUT_DIR,
+    _stores,
+    build_store_team,
+)
 
 # Absolute path to the project root so output/ is always found regardless of CWD.
 _APP_ROOT = Path(__file__).parent.parent.parent
@@ -142,7 +148,7 @@ class _StoreThread(threading.Thread):
                 dealership_id=s["dealership_id"],
                 seed=s["seed"] + batch,
                 sales_rep_ids=explicit_rep_ids or None,
-                base_close_rate=s.get("close_rate_pct", 36) / 100.0,
+                base_close_rate=s.get("close_rate_pct", DEFAULT_CLOSE_RATE_PCT) / 100.0,
                 deal_amount_min=s.get("deal_amount_min", 14000),
                 deal_amount_max=s.get("deal_amount_max", 72000),
                 gross_profit_min=s.get("gross_profit_min", 900),

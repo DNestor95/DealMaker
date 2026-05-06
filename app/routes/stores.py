@@ -28,8 +28,10 @@ from dealmaker_postgres import clear_events_for_reps, database_url_from_env, is_
 from app.supabase_client import (
     deprovision_store_reps,
     get_profiles,
+    materialize_events_for_toprep,
     priors_from_archetypes,
     provision_store_reps,
+    clear_rep_data_for_reps,
     rest_get,
     seed_source_stage_priors,
     _api_url as _supabase_api_url,
@@ -65,6 +67,11 @@ TOPREP_TEST_EMPLOYEES: list[dict] = [
     {"member_id": "M-001", "role": "manager", "name": "Sam Carter", "archetype": "solid_mid"},
 ]
 
+DEFAULT_DAILY_LEADS = 18
+DEFAULT_CLOSE_RATE_PCT = 32
+TOPREP_TEST_DAILY_LEADS = 16
+TOPREP_TEST_CLOSE_RATE_PCT = 32
+
 
 def _toprep_test_store_defaults() -> dict:
     return {
@@ -76,7 +83,7 @@ def _toprep_test_store_defaults() -> dict:
         "salespeople": 6,
         "managers": 1,
         "bdc_agents": 0,
-        "daily_leads": 25,
+        "daily_leads": TOPREP_TEST_DAILY_LEADS,
         "lead_sources": ["internet", "phone", "showroom"],
         "deal_statuses": ["lead", "qualified", "proposal", "negotiation", "closed_won", "closed_lost"],
         "activity_types": ["call", "email", "meeting", "demo", "note"],
@@ -85,7 +92,7 @@ def _toprep_test_store_defaults() -> dict:
         "deal_amount_max": 72000,
         "gross_profit_min": 900,
         "gross_profit_max": 4500,
-        "close_rate_pct": 36,
+        "close_rate_pct": TOPREP_TEST_CLOSE_RATE_PCT,
         "status_advance_pct": 88,
         "activities_per_deal_min": 4,
         "activities_per_deal_max": 12,
@@ -132,6 +139,15 @@ def _ensure_builtin_stores(stores: dict[str, dict]) -> bool:
         if store.get(key) != value:
             store[key] = value
             changed = True
+    # Migrate pre-calibration built-in stores so backfill/reset data no longer
+    # uses the old inflated 25 leads/day and 36% base close-rate defaults.
+    for key, old_value, new_value in (
+        ("daily_leads", 25, TOPREP_TEST_DAILY_LEADS),
+        ("close_rate_pct", 36, TOPREP_TEST_CLOSE_RATE_PCT),
+    ):
+        if store.get(key) in (None, old_value):
+            store[key] = new_value
+            changed = True
     return changed
 
 
@@ -159,6 +175,20 @@ def build_store_team(store: dict) -> list[TeamMember]:
         archetype_dist=store.get("archetype_dist"),
         new_hire_dates=_parse_hire_dates(store),
     )
+
+
+def store_reset_rep_ids(store_id: str, store: dict) -> list[str]:
+    """Return every known rep UUID that reset should clear for this store."""
+    rep_ids: list[str] = []
+    for cred in store.get("credentials", []) or []:
+        if isinstance(cred, dict) and cred.get("user_id") and not cred.get("error"):
+            rep_ids.append(str(cred["user_id"]))
+
+    for member in build_store_team(store):
+        if member.role in {"sales", "manager", "bdc"}:
+            rep_ids.append(sales_rep_uuid(store_id, member))
+
+    return sorted(set(rep_ids))
 
 # ---------------------------------------------------------------------------
 # Persistence helpers
@@ -271,7 +301,7 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         "salespeople": int(data.get("salespeople", 8)),
         "managers": int(data.get("managers", 2)),
         "bdc_agents": 0,
-        "daily_leads": int(data.get("daily_leads", 20)),
+        "daily_leads": int(data.get("daily_leads", DEFAULT_DAILY_LEADS)),
         "lead_sources": data.getlist("lead_sources") or ["internet", "phone", "showroom"],
         "deal_statuses": data.getlist("deal_statuses") or ["lead", "qualified", "closed_won", "closed_lost"],
         "activity_types": data.getlist("activity_types") or ["call", "email", "meeting"],
@@ -280,7 +310,7 @@ def _parse_store_form(data, existing: dict | None = None) -> dict:
         "deal_amount_max": int(data.get("deal_amount_max", 68000)),
         "gross_profit_min": int(data.get("gross_profit_min", 700)),
         "gross_profit_max": int(data.get("gross_profit_max", 6000)),
-        "close_rate_pct": int(data.get("close_rate_pct", 36)),
+        "close_rate_pct": int(data.get("close_rate_pct", DEFAULT_CLOSE_RATE_PCT)),
         "status_advance_pct": int(data.get("status_advance_pct", 88)),
         "activities_per_deal_min": int(data.get("activities_per_deal_min", 2)),
         "activities_per_deal_max": int(data.get("activities_per_deal_max", 6)),
@@ -334,21 +364,25 @@ for _s in _stores.values():
 
 
 STORE_TEMPLATES = {
-    # close_rate_pct is the blended base rate; source-specific multipliers in the
-    # generator further adjust it (internet ~40%, phone ~82%, showroom ~155%).
+    # Calibrated from 2025 NADA data: 16.2M annual light-vehicle sales across
+    # 16,990 franchised dealers (~80 units/store/month). Templates scale around
+    # the 8-12 units/rep/month band, with high-volume stores allowed higher.
+    # close_rate_pct is blended; source multipliers further adjust internet,
+    # phone, and showroom leads.
     "custom": {"label": "Custom (blank)", "salespeople": 8, "managers": 2,
-               "daily_leads": 20, "close_rate_pct": 36, "month_shape": "flat",
+               "daily_leads": 18, "close_rate_pct": 32, "month_shape": "flat",
                "archetype_dist": {"rockstar": 1, "solid_mid": 5, "underperformer": 1, "new_hire": 1}},
-    # ~60% internet mix → blended ≈20-22% close rate; 40 leads/day realistic for BDC-driven stores
+    # ~60% internet mix keeps blended close rate lower; 32 leads/day is a
+    # high-volume 12-rep store, not a default store.
     "high_volume_internet": {"label": "High-Volume Internet Store", "salespeople": 12, "managers": 3,
-                             "daily_leads": 40, "close_rate_pct": 32, "month_shape": "realistic",
+                             "daily_leads": 32, "close_rate_pct": 30, "month_shape": "realistic",
                              "archetype_dist": {"rockstar": 2, "solid_mid": 7, "underperformer": 2, "new_hire": 1}},
     # Rural walk-in skews heavily toward showroom source; higher close rate is realistic
     "rural_walkin": {"label": "Rural Walk-In Store", "salespeople": 4, "managers": 1,
-                     "daily_leads": 8, "close_rate_pct": 42, "month_shape": "realistic",
+                     "daily_leads": 7, "close_rate_pct": 38, "month_shape": "realistic",
                      "archetype_dist": {"rockstar": 1, "solid_mid": 2, "underperformer": 1, "new_hire": 0}},
     "manager_phone_store": {"label": "Manager-Led Phone Store", "salespeople": 6, "managers": 2,
-                             "daily_leads": 25, "close_rate_pct": 34, "month_shape": "realistic",
+                             "daily_leads": 15, "close_rate_pct": 31, "month_shape": "realistic",
                              "archetype_dist": {"rockstar": 1, "solid_mid": 4, "underperformer": 1, "new_hire": 0}},
 }
 
@@ -547,7 +581,7 @@ def sync_info(store_id: str):
         })
 
     # Compute expected event volume range based on store config
-    daily_leads = store.get("daily_leads", 20)
+    daily_leads = store.get("daily_leads", DEFAULT_DAILY_LEADS)
     batch_days = store.get("batch_days", 1)
     activities_min = store.get("activities_per_deal_min", 2)
     activities_max = store.get("activities_per_deal_max", 6)
@@ -596,7 +630,7 @@ def sync_info(store_id: str):
             "speed_label": speed_label,
             "batch_days": batch_days,
             "daily_leads": daily_leads,
-            "close_rate_pct": store.get("close_rate_pct", 36),
+            "close_rate_pct": store.get("close_rate_pct", DEFAULT_CLOSE_RATE_PCT),
             "seed": store.get("seed", 42),
             "month_shape": store.get("month_shape", "flat"),
             "default_scenarios": store.get("default_scenarios", []),
@@ -705,14 +739,26 @@ def reset_store_data(store_id: str):
     db_url = database_url_from_env()
     deleted = 0
     delete_error: str | None = None
+    rep_ids = store_reset_rep_ids(store_id, store)
     if db_url and is_postgres_dsn(db_url):
-        credentials = store.get("credentials") or []
-        rep_ids = [c["user_id"] for c in credentials if isinstance(c, dict) and c.get("user_id") and not c.get("error")]
         if rep_ids:
             result = clear_events_for_reps(db_url, rep_ids)
             deleted = result.get("deleted", 0)
             if not result.get("ok"):
                 delete_error = result.get("error", "Unknown error clearing events")
+    elif delivery in {"api", "both"}:
+        result = clear_rep_data_for_reps(rep_ids)
+        deleted = result.get("deleted") or 0
+        if not result.get("ok"):
+            delete_error = result.get("error", "Unknown error clearing Supabase data")
+
+    if delete_error and delivery in {"api", "both"}:
+        return jsonify({
+            "ok": False,
+            "error": delete_error,
+            "deleted_from_db": deleted,
+            "rep_ids": len(rep_ids),
+        }), 500
 
     # ── 2. Generate backfill: (days-1) days of history + today ───────────
     now = datetime.now(timezone.utc)
@@ -728,7 +774,7 @@ def reset_store_data(store_id: str):
         team=team,
         dealership_id=store_id,
         seed=store.get("seed", 20260501),
-        base_close_rate=store.get("close_rate_pct", 36) / 100.0,
+        base_close_rate=store.get("close_rate_pct", DEFAULT_CLOSE_RATE_PCT) / 100.0,
         deal_amount_min=store.get("deal_amount_min", 14000),
         deal_amount_max=store.get("deal_amount_max", 72000),
         gross_profit_min=store.get("gross_profit_min", 900),
@@ -751,6 +797,7 @@ def reset_store_data(store_id: str):
     # ── 4. Push to API ────────────────────────────────────────────────────
     api_errors = 0
     api_error_msg: str | None = None
+    materialize_result: dict | None = None
     if delivery in {"api", "both"}:
         raw_url = os.getenv("TOPREP_API_URL", "").strip() or db_url or _supabase_api_url()
         api_url = normalize_delivery_url(raw_url)
@@ -764,10 +811,22 @@ def reset_store_data(store_id: str):
                 "error": "Authentication failed — set TOPREP_AUTH_TOKEN or SUPABASE_SERVICE_ROLE_KEY.",
             }), 401
         if api_url:
-            result = send_events_to_api(events, api_url, auth_token, supabase_apikey)
-            api_errors = result["failed"]
-            if api_errors and result.get("errors"):
-                api_error_msg = str(result["errors"][0])[:200]
+            # Send in batches of 500 so each request completes well within
+            # the HTTP timeout.  A 90-day backfill can be 15k–25k events.
+            _BATCH = 500
+            for i in range(0, len(events), _BATCH):
+                chunk = events[i: i + _BATCH]
+                result = send_events_to_api(
+                    chunk, api_url, auth_token, supabase_apikey,
+                    timeout_seconds=30, max_retries=2,
+                )
+                api_errors += result["failed"]
+                if result.get("errors") and not api_error_msg:
+                    api_error_msg = str(result["errors"][0])[:200]
+        if not api_error_msg:
+            materialize_result = materialize_events_for_toprep([event.to_dict() for event in events])
+            if not materialize_result.get("ok"):
+                api_error_msg = str(materialize_result.get("error", "Materialization failed"))[:200]
 
     response: dict = {
         "ok": not api_error_msg and not delete_error,
@@ -778,6 +837,8 @@ def reset_store_data(store_id: str):
         "deleted_from_db": deleted,
         "api_errors": api_errors if delivery in {"api", "both"} else None,
     }
+    if materialize_result is not None:
+        response["materialized"] = materialize_result
     if delete_error:
         response["delete_warning"] = delete_error
     if api_error_msg:

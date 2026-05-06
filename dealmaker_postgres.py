@@ -113,10 +113,13 @@ def insert_events(database_url: str, rows: Iterable[Mapping[str, Any]]) -> tuple
 
 
 def clear_events_for_reps(database_url: str, rep_ids: list[str]) -> dict[str, Any]:
-    """Delete all events rows whose sales_rep_id is in `rep_ids`.
+    """Delete materialized DealMaker data rows whose rep id is in `rep_ids`.
 
     Used by the store-reset flow to wipe only that store's data without
-    touching other stores' events or non-events tables.
+    touching other stores' data.  TopRep dashboards read cached/materialized
+    tables such as rep_month_stats, so clearing only events leaves stale MTD
+    units behind. Raw events are intentionally left alone when TopRep enforces
+    append-only event storage.
     """
     dsn = (database_url or database_url_from_env()).strip()
     if not dsn:
@@ -133,12 +136,58 @@ def clear_events_for_reps(database_url: str, rep_ids: list[str]) -> dict[str, An
         with psycopg.connect(dsn, connect_timeout=15) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM events WHERE sales_rep_id = ANY(%s::uuid[])",
-                    ([str(r) for r in rep_ids],),
+                    """
+                    SELECT table_name, column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = ANY(%s)
+                      AND column_name = ANY(%s)
+                    """,
+                    (
+                        [
+                            "activities",
+                            "deals",
+                            "forecast_queue",
+                            "forecast_runs",
+                            "quotas",
+                            "rep_experience",
+                            "rep_month_forecast",
+                            "rep_month_stats",
+                            "rep_stage_posteriors",
+                            "rep_stage_stats",
+                        ],
+                        ["sales_rep_id", "rep_id"],
+                    ),
                 )
-                deleted = cur.rowcount
+                existing = {(str(table), str(column)) for table, column in cur.fetchall()}
+
+                delete_plan = [
+                    ("forecast_queue", "rep_id"),
+                    ("rep_month_forecast", "rep_id"),
+                    ("rep_stage_posteriors", "rep_id"),
+                    ("rep_stage_stats", "rep_id"),
+                    ("rep_experience", "rep_id"),
+                    ("quotas", "rep_id"),
+                    ("forecast_runs", "rep_id"),
+                    ("activities", "sales_rep_id"),
+                    ("deals", "sales_rep_id"),
+                    ("rep_month_stats", "rep_id"),
+                ]
+
+                deleted_by_table: dict[str, int] = {}
+                total_deleted = 0
+                for table_name, column_name in delete_plan:
+                    if (table_name, column_name) not in existing:
+                        continue
+                    cur.execute(
+                        f'DELETE FROM "{table_name}" WHERE "{column_name}" = ANY(%s::uuid[])',
+                        ([str(r) for r in rep_ids],),
+                    )
+                    deleted_count = max(0, cur.rowcount)
+                    deleted_by_table[table_name] = deleted_count
+                    total_deleted += deleted_count
             conn.commit()
-        return {"ok": True, "deleted": deleted}
+        return {"ok": True, "deleted": total_deleted, "deleted_by_table": deleted_by_table}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
