@@ -356,7 +356,7 @@ class TestFlaskBackfillRoute:
             "daily_leads": 3,
             "seed": 42,
             "delivery": "file",
-            "close_rate_pct": 36,
+            "close_rate_pct": 32,
             "deal_amount_min": 12000,
             "deal_amount_max": 68000,
             "gross_profit_min": 700,

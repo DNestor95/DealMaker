@@ -5,6 +5,7 @@ Source of truth: REALTIME_DATA_INGEST_REFERENCE.md
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 import pytest
@@ -407,3 +408,34 @@ class TestGeneratedEventsCompliance:
             assert pattern.match(event.created_at), (
                 f"bad created_at format: {event.created_at!r}"
             )
+
+    def test_six_rep_monthly_units_are_realistic(self):
+        """Guard the default calibration against inflated salesperson unit counts."""
+        team = build_team(
+            salespeople=6,
+            managers=1,
+            bdc_agents=0,
+            archetype_dist={"rockstar": 1, "solid_mid": 3, "underperformer": 1, "new_hire": 1},
+        )
+        start = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        events = generate_events(
+            start_date=start,
+            days=30,
+            daily_leads=16,
+            team=team,
+            dealership_id=_DEALERSHIP,
+            seed=20260501,
+            base_close_rate=0.32,
+            month_shape="realistic",
+        )
+
+        rep_ids = [event.sales_rep_id for event in events if event.type == "rep_quota_updated"]
+        sold_by_rep = Counter(
+            event.sales_rep_id
+            for event in events
+            if event.type == "deal.status_changed" and event.payload.get("new_status") == "closed_won"
+        )
+        monthly_units = [sold_by_rep[rep_id] for rep_id in rep_ids]
+
+        assert 45 <= sum(monthly_units) <= 75
+        assert max(monthly_units) <= 24

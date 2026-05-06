@@ -37,8 +37,8 @@ STORE_TEMPLATES: dict[str, dict] = {
         "salespeople": 8,
         "managers": 2,
         "bdc_agents": 3,
-        "daily_leads": 20,
-        "close_rate_pct": 36,
+        "daily_leads": 18,
+        "close_rate_pct": 32,
         "month_shape": "flat",
         "archetype_dist": {"rockstar": 1, "solid_mid": 5, "underperformer": 1, "new_hire": 1},
     },
@@ -47,7 +47,7 @@ STORE_TEMPLATES: dict[str, dict] = {
         "salespeople": 12,
         "managers": 3,
         "bdc_agents": 5,
-        "daily_leads": 40,
+        "daily_leads": 32,
         "close_rate_pct": 30,
         "month_shape": "realistic",
         "archetype_dist": {"rockstar": 2, "solid_mid": 7, "underperformer": 2, "new_hire": 1},
@@ -57,8 +57,8 @@ STORE_TEMPLATES: dict[str, dict] = {
         "salespeople": 4,
         "managers": 1,
         "bdc_agents": 1,
-        "daily_leads": 8,
-        "close_rate_pct": 45,
+        "daily_leads": 7,
+        "close_rate_pct": 38,
         "month_shape": "realistic",
         "archetype_dist": {"rockstar": 1, "solid_mid": 2, "underperformer": 1, "new_hire": 0},
     },
@@ -67,8 +67,8 @@ STORE_TEMPLATES: dict[str, dict] = {
         "salespeople": 6,
         "managers": 2,
         "bdc_agents": 8,
-        "daily_leads": 25,
-        "close_rate_pct": 33,
+        "daily_leads": 15,
+        "close_rate_pct": 31,
         "month_shape": "realistic",
         "archetype_dist": {"rockstar": 1, "solid_mid": 4, "underperformer": 1, "new_hire": 0},
     },
@@ -269,7 +269,7 @@ class DealMakerGUI:
         self.salespeople_var = StringVar(value="8")
         self.managers_var = StringVar(value="2")
         self.bdc_var = StringVar(value="3")
-        self.daily_leads_var = StringVar(value="20")
+        self.daily_leads_var = StringVar(value="18")
         self.batch_days_var = StringVar(value="1")
         self.every_seconds_var = StringVar(value="10")
         self.seed_var = StringVar(value="42")
@@ -288,7 +288,7 @@ class DealMakerGUI:
         self.deal_amount_max_var = StringVar(value="68000")
         self.gross_profit_min_var = StringVar(value="700")
         self.gross_profit_max_var = StringVar(value="6000")
-        self.close_rate_pct_var = StringVar(value="36")
+        self.close_rate_pct_var = StringVar(value="32")
         self.status_advance_pct_var = StringVar(value="88")
         self.activities_per_deal_min_var = StringVar(value="2")
         self.activities_per_deal_max_var = StringVar(value="6")
@@ -617,8 +617,8 @@ class DealMakerGUI:
         self.salespeople_var.set(str(tpl.get("salespeople", 8)))
         self.managers_var.set(str(tpl.get("managers", 2)))
         self.bdc_var.set(str(tpl.get("bdc_agents", 3)))
-        self.daily_leads_var.set(str(tpl.get("daily_leads", 20)))
-        self.close_rate_pct_var.set(str(tpl.get("close_rate_pct", 36)))
+        self.daily_leads_var.set(str(tpl.get("daily_leads", 18)))
+        self.close_rate_pct_var.set(str(tpl.get("close_rate_pct", 32)))
         self.month_shape_var.set(str(tpl.get("month_shape", "flat")))
         dist = tpl.get("archetype_dist", {})
         self.arch_rockstar_var.set(str(dist.get("rockstar", 1)))
@@ -792,7 +792,7 @@ class DealMakerGUI:
         supabase_apikey: str,
         sales_rep_ids: str,
         output_dir: str,
-        close_rate_pct: str = "36",
+        close_rate_pct: str = "32",
         status_advance_pct: str = "88",
         activities_per_deal_min: str = "2",
         activities_per_deal_max: str = "6",
