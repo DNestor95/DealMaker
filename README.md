@@ -1,385 +1,163 @@
 # DealMaker
 
-Generates synthetic dealership CRM traffic so you can test `totrep` with realistic event streams.
+A Flask web app that generates synthetic dealership CRM event streams for testing sales-intelligence platforms. Simulate realistic deal lifecycles, rep activity, and quota events — then deliver them as JSONL files or push them directly to an API.
 
-## What it simulates
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/DNestor95/DealMaker)
 
-- `deal.created`
-- `deal.status_changed`
-- `activity.scheduled`
-- `activity.completed`
-- `rep_quota_updated`
+---
 
-All output follows the TOP REP canonical event envelope from `REALTIME_DATA_INGEST_REFERENCE.md`.
+## Features
 
-## API-first smoke test
+- Simulates five event types: `deal.created`, `deal.status_changed`, `activity.scheduled`, `activity.completed`, `rep_quota_updated`
+- Deliver events to a **file** (JSONL or CSV), an **API endpoint**, or **both**
+- **Flask web UI** for managing multiple stores and running live simulations
+- **CLI generator** for scripted or reproducible runs
+- Schema validation against the TopRep canonical event envelope
+- Deployable to Vercel or Railway; runs locally with no database required
 
-### Step 1 — generate a tiny reproducible dataset
+---
 
-```bash
-python dealmaker_generator.py \
-  --days 1 --daily-leads 3 --seed 42 \
-  --delivery file \
-  --output output/events_smoke.jsonl
-```
-
-### Step 2 — validate the file against the TopRep contract
+## Quick Start
 
 ```bash
-python dealmaker_generator.py \
-  --days 1 --daily-leads 3 --seed 42 \
-  --delivery file \
-  --output output/events_smoke.jsonl \
-  --validate
-```
+# Install dependencies
+pip install -r requirements.txt
 
-The `--validate` flag appends a `schema_validation` key to the JSON summary. When all events pass, `"passed": true` is printed and the process exits 0. Any violations print to the same JSON block and the process exits 1.
+# Copy and fill in credentials (all optional for local file output)
+cp .env.example .env
 
-### Step 3 — post directly to the TopRep API
-
-```bash
-python dealmaker_generator.py \
-  --days 1 --daily-leads 3 --seed 42 \
-  --delivery api \
-  --api-url https://<your-domain>/api/events \
-  --auth-token <your-jwt>
-```
-
-Add `--validate` to also run the local schema check before posting:
-
-```bash
-python dealmaker_generator.py \
-  --days 1 --daily-leads 3 --seed 42 \
-  --delivery api \
-  --api-url https://<your-domain>/api/events \
-  --auth-token <your-jwt> \
-  --validate
-```
-
-### Step 4 — run the automated contract tests
-
-```bash
-python -m pytest tests/test_schema_compliance.py -v
-```
-
-The test suite (56 tests) proves that:
-- All envelope keys (`sales_rep_id`, `type`, `payload`, `created_at`) are present and valid.
-- `created_at` is always UTC ISO-8601 with milliseconds and a `Z` suffix (e.g. `2026-03-03T15:04:05.000Z`).
-- Every event type is one of the five allowed types.
-- Required payload fields are present for every event type.
-- `activity_type` is always one of `call|email|meeting|demo|note`.
-- `outcome` is always one of the ten allowed outcome values.
-- Status fields use only `lead|qualified|proposal|negotiation|closed_won|closed_lost`.
-- `gross_profit` (optional per TopRep schema) is included by DealMaker.
-- `created_at` (optional per TopRep schema) is always sent for backfill fidelity.
-- All five event types are generated in a normal simulation run.
-
-## Fortellis-shaped ingestion test for TopRep
-
-DealMaker also exposes a local Fortellis / CDK Elead-compatible mock API, so
-TopRep can test its real Fortellis ingestion client without calling Fortellis.
-
-1. Start the DealMaker web app:
-
-```bash
+# Start the Flask web app
 python run.py
+# → http://127.0.0.1:5000
 ```
 
-2. Open the built-in `TopRep API Test Store`. Its `Dealership ID` is
-   `toprep-api-test`, and its employee roster is static for stable TopRep rep
-   mapping. Custom stores can still be created later from `+ New Store`.
-
-3. In TopRep's Fortellis integration config, point the provider at DealMaker:
-
-```text
-base_url:        http://localhost:5050
-subscription_id: toprep-api-test
-token_url:       http://localhost:5050/oauth2/aus1p1ixy7YL8cMq02p7/v1/token
-```
-
-The mock accepts any token request credentials and returns
-`mock-fortellis-token`. TopRep requests must send:
-
-```text
-Authorization: Bearer mock-fortellis-token
-Subscription-Id: toprep-api-test
-```
-
-Available Fortellis-shaped endpoints:
-
-```text
-GET  /sales/v1/elead/activities/activityTypes
-GET  /sales/v2/elead/opportunities/search
-GET  /sales/v2/elead/opportunities/search?status=sold
-GET  /sales/v1/elead/activities/history/byOpportunityId/{opportunityId}
-GET  /sales/v1/elead/reference/employees
-POST /fortellis-mock/clear-cache
-GET  /fortellis-mock/status
-```
-
-Rep mapping: Fortellis `employeeId` / `salesPersonId` values are static
-DealMaker member IDs such as `S-001`. Set TopRep `reps.employee_external_id`
-to those values so imported leads, deals, and activities resolve to the
-expected reps.
-
-## Clear Database (schema-aware)
-
-Use this command to clear all data from the Postgres public schema after
-schema changes. It discovers tables at runtime, so newly added tables are
-included automatically.
-
-```bash
-python clear_db.py
-```
-
-Non-interactive mode:
-
-```bash
-python clear_db.py --yes
-```
-
-Requires `DATABASE_URL` (or `TOPREP_DATABASE_URL`) to be set in your `.env`.
-
-## Verification plan
-
-1. **Local file check** — run Step 1 + Step 2 above; confirm `"passed": true`.
-2. **Unit tests** — run Step 4; confirm `56 passed`.
-3. **Live API post** — run Step 3 with real credentials; confirm `api_result.sent > 0` and `api_result.failed == 0`.
-4. **TopRep side** — verify new rows appear in the `events` table and `rep_month_stats` updates as expected (see §6 of `REALTIME_DATA_INGEST_REFERENCE.md`).
-
-## Quick start
-
-From the project root:
+Or use the CLI generator directly to write events to a file:
 
 ```bash
 python dealmaker_generator.py --output output/events.jsonl
 ```
 
-This writes newline-delimited JSON events to `output/events.jsonl`.
+---
 
-## GUI (multi-store concurrent runner)
-
-Launch the GUI:
+## CLI Usage
 
 ```bash
-python dealmaker_gui.py
-```
+# Generate 14 days of JSONL events (default)
+python dealmaker_generator.py --output output/events.jsonl
 
-The GUI lets you:
+# Generate 30 days with higher traffic
+python dealmaker_generator.py --days 30 --daily-leads 35 --output output/events_30d.jsonl
 
-- Set `Dealership ID`, `Sales Reps`, `Managers`, and `BDC Agents`
-- Configure traffic rate (`Daily Leads`), generation batch size (`Batch Days`), and loop interval (`Every Seconds`)
-- Add and start multiple stores at once
-- Keep each store running in the background while you add more stores
-- Write each store's output continuously to its own file (`output/stores/<DEALERSHIP_ID>.jsonl`)
-- Send events directly to TOP REP ingest API (`/api/events`) per store
-
-Controls:
-
-- **Add + Start Store**: opens a full settings dialog for that new store, then starts it
-- **Stop Selected**: pauses one store
-- **Start Selected**: resumes one store
-- **Remove Selected**: stops and removes one store from the GUI list
-- **Stop All**: stops every running store
-
-## Common commands
-
-Generate 30 days in JSONL:
-
-```bash
-python dealmaker_generator.py --days 30 --daily-leads 35 --format jsonl --output output/events_30d.jsonl
-```
-
-Generate CSV:
-
-```bash
+# Generate CSV
 python dealmaker_generator.py --days 14 --format csv --output output/events.csv
-```
 
-Reproducible output with a fixed seed:
-
-```bash
+# Reproducible output with a fixed seed
 python dealmaker_generator.py --seed 1337 --output output/events_seeded.jsonl
+
+# Post directly to an API
+python dealmaker_generator.py --delivery api \
+  --api-url https://<your-domain>/api/events \
+  --auth-token <your-jwt>
+
+# Write file and post to API simultaneously
+python dealmaker_generator.py --delivery both \
+  --api-url https://<your-domain>/api/events \
+  --auth-token <your-jwt> \
+  --output output/events_live.jsonl
+
+# Validate generated events against the TopRep schema
+python dealmaker_generator.py --validate --output output/events_smoke.jsonl
 ```
 
-Send directly to TOP REP API only:
+> `.env` is auto-loaded on startup — CLI flags override `.env` values.
+
+### CLI Parameters
+
+| Flag | Default | Description |
+|---|---|---|
+| `--start-date` | today | Start date (`YYYY-MM-DD`) |
+| `--days` | `14` | Number of days to simulate |
+| `--daily-leads` | `20` | Leads per day |
+| `--salespeople` | `8` | Number of sales reps |
+| `--managers` | `2` | Number of managers |
+| `--bdc` | `3` | Number of BDC agents |
+| `--dealership-id` | `DLR-001` | Dealership identifier |
+| `--seed` | `42` | Random seed for reproducibility |
+| `--delivery` | `file` | `file`, `api`, or `both` |
+| `--api-url` | — | TopRep `/api/events` endpoint |
+| `--auth-token` | — | JWT (or set `TOPREP_AUTH_TOKEN` in `.env`) |
+| `--format` | `jsonl` | `jsonl` or `csv` |
+| `--output` | `output/events.jsonl` | Output file path |
+| `--validate` | flag | Run schema compliance check before/after generation |
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in the values you need.
+
+| Variable | Required for | Description |
+|---|---|---|
+| `FLASK_SECRET_KEY` | Vercel deployment | Random hex string for signing sessions |
+| `TOPREP_AUTH_TOKEN` | API delivery | Your TopRep user JWT |
+| `TOPREP_API_URL` | API delivery | TopRep `/api/events` or Supabase REST URL |
+| `SUPABASE_ANON_KEY` | Direct Supabase mode | `sb_publishable_*` key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Rep provisioning | Supabase Admin key — **never expose to the browser** |
+| `TOPREP_APP_URL` | Optional | Your deployed TopRep app URL |
+| `DATABASE_URL` | Direct Postgres mode | Postgres connection string |
+
+Generate a Flask secret key:
 
 ```bash
-python dealmaker_generator.py --delivery api --api-url https://<your-domain>/api/events --auth-token <jwt>
+python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Write file and send to API at the same time:
+---
 
-```bash
-python dealmaker_generator.py --delivery both --api-url https://<your-domain>/api/events --auth-token <jwt> --output output/events_live.jsonl
-```
+## Event Schema
 
-Use `.env` (recommended, auto-loaded by CLI and GUI):
-
-```bash
-# copy .env.example to .env, then fill values
-python dealmaker_generator.py --delivery both --output output/events_live.jsonl
-```
-
-## Parameters
-
-- `--start-date` (default: today, `YYYY-MM-DD`)
-- `--days` (default: `14`)
-- `--daily-leads` (default: `20`)
-- `--salespeople` (default: `8`)
-- `--managers` (default: `2`)
-- `--bdc` (default: `3`)
-- `--dealership-id` (default: `DLR-001`)
-- `--seed` (default: `42`)
-- `--delivery` (`file`, `api`, or `both`; default: `file`)
-- `--api-url` (required for `api`/`both`, e.g. `https://<domain>/api/events`)
-- `--auth-token` (required for `api`/`both`, or set `TOPREP_AUTH_TOKEN` env var)
-- `--format` (`jsonl` or `csv`, default: `jsonl`)
-- `--output` (default: `output/events.jsonl`)
-- `--validate` (flag; validate generated events against the TopRep API contract and print a compliance report)
-
-## Event schema
-
-Each event includes:
-
-- `sales_rep_id` (UUID)
-- `type` (one of allowed TOP REP event types)
-- `payload` (type-specific object)
-- `created_at` (UTC ISO-8601)
-
-### Allowed event types
-
-- `deal.created`
-- `deal.status_changed`
-- `activity.scheduled`
-- `activity.completed`
-- `rep_quota_updated`
-
-## Using with toprep
-
-- If `totrep` accepts JSONL event feeds directly, point it to `output/events.jsonl`.
-- If `totrep` expects CSV, generate with `--format csv`.
-- If posting directly to TOP REP API, send each line/event to `POST /api/events`.
-- For multi-store streams, point `totrep` to one or more files under `output/stores/`.
-
-## Database/API connection setup
-
-Preferred path is TOP REP API (recommended by your reference):
-
-1. Get a valid user JWT for TOP REP.
-2. Create a `.env` file in this project (you can copy `.env.example`):
-	- `TOPREP_API_URL=https://<your-domain>/api/events`
-	- `TOPREP_AUTH_TOKEN=<your-jwt>`
-3. Use `--delivery api` or `--delivery both` with `--api-url https://<your-domain>/api/events`.
-4. In GUI Add Store dialog, set:
-	- `Delivery` = `api` or `both`
-	- `API URL` = TOP REP `/api/events` (auto-filled from `.env`)
-	- `Auth Token` = JWT (auto-filled from `.env`)
-
-Notes:
-
-- `dealmaker_generator.py` and `dealmaker_gui.py` auto-load `.env` on startup.
-- CLI flags still override `.env` values.
-
-### Direct Supabase mode (without `/api/events`)
-
-If `TOPREP_API_URL` is set to `https://<project-ref>.supabase.co`, DealMaker writes to `.../rest/v1/events`.
-
-Required `.env` values for this mode:
-
-- `TOPREP_API_URL=https://<project-ref>.supabase.co`
-- `TOPREP_AUTH_TOKEN=<user-jwt>`
-- `SUPABASE_ANON_KEY=<sb_publishable_...>`
-
-Important for RLS:
-
-- `TOPREP_AUTH_TOKEN` must be a user JWT (not the `sb_publishable_*` key).
-- `sales_rep_id` is auto-derived from JWT `sub` so inserts can satisfy typical RLS policies.
-
-### Supabase Edge Function mode
-
-If your endpoint is a Supabase Edge Function URL like:
-
-- `https://<project-ref>.functions.supabase.co/<function-name>`
-
-DealMaker now sends a **batch** payload in this shape:
+Every event follows the TopRep canonical envelope:
 
 ```json
 {
-	"actions": [
-		{
-			"rep_id": "<sales_rep_id>",
-			"deal_id": "<deal_id|null>",
-			"action_type": "<event type>",
-			"outcome": "<outcome|null>",
-			"source": "<source|null>",
-			"created_at": "<iso timestamp>"
-		}
-	]
+  "sales_rep_id": "<uuid>",
+  "type": "<event_type>",
+  "payload": { "...": "..." },
+  "created_at": "2026-03-03T15:04:05.000Z"
 }
 ```
 
-Required `.env` values for this mode:
+---
 
-- `TOPREP_API_URL=https://<project-ref>.functions.supabase.co/<function-name>`
-- `TOPREP_AUTH_TOKEN=<user-jwt>`
-- `SUPABASE_ANON_KEY=<sb_publishable_...>`
+## Tests
 
-### Direct Postgres mode
+```bash
+python -m pytest tests/test_schema_compliance.py -v
+```
 
-If you want to bypass HTTP delivery entirely, DealMaker can insert directly into
-the `events` table over Postgres.
+The suite validates envelope structure, field types, allowed values, and that all five event types are generated in a normal run.
 
-Required `.env` values for this mode:
+---
 
-- `DATABASE_URL=postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres`
+## Deployment
 
-Notes:
+### Vercel
 
-- `TOPREP_AUTH_TOKEN` is not required for direct Postgres delivery.
-- `TOPREP_API_URL` can be left unset when `DATABASE_URL` is configured.
-- The app inserts the same `sales_rep_id`, `type`, `payload`, and `created_at`
-  envelope used by the existing HTTP delivery path.
+Import the repo in the Vercel dashboard, set the environment variables above, and deploy. Vercel detects `vercel.json` automatically.
 
-## Vercel deployment
+> **Note:** Live simulation (background threads) is not supported on Vercel's serverless platform. Use the **Backfill** feature for historical data, or run on [Railway](https://railway.app) for real-time simulation.
 
-DealMaker can be deployed to [Vercel](https://vercel.com) so you can manage
-testing from anywhere without running a local server.
+### Railway / local server
 
-### One-click deploy
+```bash
+python run.py  # or: gunicorn wsgi:app
+```
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/DNestor95/DealMaker)
+### Clear the database
 
-### Manual steps
+```bash
+python clear_db.py        # interactive
+python clear_db.py --yes  # non-interactive
+```
 
-1. **Push this repo** to GitHub (or fork it).
-2. **Import the project** in the Vercel dashboard → *Add New → Project*.
-3. **Set environment variables** in *Project Settings → Environment Variables*:
-
-   | Variable | Required | Description |
-   |---|---|---|
-   | `FLASK_SECRET_KEY` | ✅ | Random hex string for signing sessions (see below) |
-   | `TOPREP_AUTH_TOKEN` | For API delivery | Your TopRep user JWT |
-   | `SUPABASE_SERVICE_ROLE_KEY` | For rep provisioning | Supabase Admin key (never exposed to the browser) |
-   | `TOPREP_APP_URL` | Optional | Your deployed TopRep app URL |
-   | `DATABASE_URL` | For direct Postgres | Postgres connection string |
-
-   Generate a secret key:
-
-   ```bash
-   python -c "import secrets; print(secrets.token_hex(32))"
-   ```
-
-4. **Deploy** — Vercel detects `vercel.json` and uses `@vercel/python`.
-
-### Notes on Vercel limitations
-
-- **Live simulation is not supported** on Vercel because serverless functions
-  cannot run persistent background threads.  Use the **Backfill** feature to
-  generate historical data instead, or run DealMaker locally / on
-  [Railway](https://railway.app) for real-time simulation.
-- Settings saved via the UI are written to `/tmp/.env` on Vercel; they persist
-  only for the lifetime of that function instance.  Set credentials as Vercel
-  environment variables for durable configuration.
-- Static assets (`/static/…`) are served directly from Vercel's CDN — no
-  extra configuration needed.
+Requires `DATABASE_URL` in `.env`.
